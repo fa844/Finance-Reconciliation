@@ -1,0 +1,21 @@
+---
+description: Instructions for maintaining session-to-session continuity
+globs: **/*
+---
+
+# Session Continuity & Memory Rules
+
+## 1. Context Awareness
+- Before starting any task, always check for existing progress in the codebase to ensure consistency with previous edits.
+- Do not suggest patterns or libraries that conflict with the established architectural choices seen in current files.
+
+## 2. "Memory" Protocol
+- Treat this new chat session as a direct continuation of the previous development work. 
+- If I ask to "continue the plan," look for the most recent `@modified` files to understand the current state of the feature.
+
+## 3. Tech Stack Lock-in
+- **Database:** Always assume Supabase is the backend. Ensure Row-Level Security (RLS) is applied to any new tables or queries.
+- **Frontend:** Maintain the current [React/Tailwind] patterns established in the `/src` directory.
+
+## 4. Progress Tracking
+- If a task is complex, provide a brief "Current Progress" checklist at the end of your response so I can copy it into the next session if the context window gets full.
