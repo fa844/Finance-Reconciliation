@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
+import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
 import {
   BarChart,
   Bar,
@@ -184,6 +185,7 @@ export default function Dashboard() {
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; channels: string[]; currencies: string[]; statuses: string[] }>({ countries: [], channels: [], currencies: [], statuses: [] })
   const [openDropdown, setOpenDropdown] = useState<string | null>(null)
   const router = useRouter()
+  const { setRightContent } = useHeaderRight()
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -342,6 +344,25 @@ export default function Dashboard() {
     router.push('/')
   }
 
+  useEffect(() => {
+    if (!session?.user) {
+      setRightContent(null)
+      return
+    }
+    setRightContent(
+      <>
+        <span className="shrink-0 inline-flex items-center text-sm text-gray-600 whitespace-nowrap h-[38px]">{session.user?.email}</span>
+        <button
+          onClick={handleSignOut}
+          className="shrink-0 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
+        >
+          Sign Out
+        </button>
+      </>
+    )
+    return () => setRightContent(null)
+  }, [session, setRightContent])
+
   if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
@@ -355,46 +376,9 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <header className="bg-white shadow-md border-b-4 border-orange-500">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
-          <div className="flex flex-wrap justify-between items-center gap-4">
-            <h1 className="text-2xl font-bold bg-gradient-to-r from-orange-500 to-orange-700 bg-clip-text text-transparent">
-              Dashboard
-            </h1>
-            <div className="flex items-center flex-wrap gap-3">
-              <button
-                onClick={() => router.push('/data')}
-                className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
-              >
-                Data / Bookings
-              </button>
-              <button
-                onClick={() => router.push('/uploads')}
-                className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
-              >
-                Upload History
-              </button>
-              <button
-                onClick={() => router.push('/history')}
-                className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
-              >
-                History of Edits
-              </button>
-              <span className="text-sm text-gray-600">{session.user?.email}</span>
-              <button
-                onClick={handleSignOut}
-                className="shrink-0 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
-
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Filters */}
-        <section className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+        {/* Filters - sticky so they stay visible when scrolling */}
+        <section className="sticky top-0 z-10 bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
           <h2 className="text-lg font-semibold text-gray-800 mb-3">Filters</h2>
           <div className="flex flex-wrap gap-4 items-end">
             <MultiSelectFilter

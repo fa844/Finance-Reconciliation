@@ -1,5 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import TopNav from './components/TopNav'
+import { HeaderRightProvider } from './contexts/HeaderRightContext'
 
 export const metadata: Metadata = {
   title: 'Payment reconciliation',
@@ -18,7 +20,12 @@ export default function RootLayout({
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
       </head>
-      <body className="bg-gray-100 font-inter antialiased">{children}</body>
+      <body className="bg-gray-100 font-inter antialiased">
+        <HeaderRightProvider>
+          <TopNav />
+          {children}
+        </HeaderRightProvider>
+      </body>
     </html>
   )
 }

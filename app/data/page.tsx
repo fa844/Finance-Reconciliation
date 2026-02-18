@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 import * as XLSX from 'xlsx'
+import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
 
 interface Table {
   table_name: string
@@ -58,6 +59,7 @@ export default function DataPage() {
   const [uploadPhase, setUploadPhase] = useState<'idle' | 'parsing' | 'checking_duplicates' | 'preparing' | 'inserting' | 'linking' | 'saving_file'>('idle')
   const [uploadProgressDetail, setUploadProgressDetail] = useState<string>('')
   const uploadCancelledRef = useRef(false)
+  const { setRightContent } = useHeaderRight()
 
   // Columns that should have multi-select dropdowns
   const multiSelectColumns = ['country', 'channel', 'zuzu_managing_channel_invoicing', 'status', 'currency']
@@ -1378,6 +1380,77 @@ export default function DataPage() {
     await insertBookings(processedData, totalRows, filteredCount, fileName, sheetName, duplicateInfo.file, duplicateInfo.duplicates.length)
   }
 
+  useEffect(() => {
+    if (!session?.user) {
+      setRightContent(null)
+      return
+    }
+    const hasActiveFilters = Object.keys(filters).some(k => filters[k]) || Object.keys(multiSelectFilters).some(k => multiSelectFilters[k]?.length > 0) || Object.keys(dateRangeFilters).some(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim())
+    const filterCount = Object.keys(filters).filter(k => filters[k]).length + Object.keys(multiSelectFilters).filter(k => multiSelectFilters[k]?.length > 0).length + Object.keys(dateRangeFilters).filter(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim()).length
+    setRightContent(
+      <>
+        {selectedTable === 'bookings' && (
+          <>
+            <button
+              onClick={() => {
+                if (!showFilters) {
+                  setPendingFilters({...filters})
+                  setPendingMultiSelectFilters({...multiSelectFilters})
+                  setPendingDateRangeFilters({...dateRangeFilters})
+                }
+                setShowFilters(!showFilters)
+                setOpenDropdown(null)
+                setOpenDateRangeColumn(null)
+              }}
+              className={`shrink-0 whitespace-nowrap px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center ${
+                showFilters || hasActiveFilters
+                  ? 'bg-orange-500 text-white hover:bg-orange-600'
+                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+              }`}
+            >
+              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+              </svg>
+              Filters
+              {hasActiveFilters && (
+                <span className="ml-2 bg-white text-orange-500 rounded-full px-2 py-0.5 text-xs font-bold">
+                  {filterCount}
+                </span>
+              )}
+            </button>
+            {showFilters && (
+              <>
+                <button
+                  onClick={applyFilters}
+                  className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center whitespace-nowrap"
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  Apply
+                </button>
+                <button
+                  onClick={clearFilters}
+                  className="shrink-0 bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 whitespace-nowrap"
+                >
+                  Clear
+                </button>
+              </>
+            )}
+          </>
+        )}
+        <span className="shrink-0 inline-flex items-center text-sm text-gray-600 whitespace-nowrap h-[38px]">{session.user?.email}</span>
+        <button
+          onClick={handleSignOut}
+          className="shrink-0 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 whitespace-nowrap"
+        >
+          Sign Out
+        </button>
+      </>
+    )
+    return () => setRightContent(null)
+  }, [session, selectedTable, showFilters, filters, multiSelectFilters, dateRangeFilters, loading, setRightContent])
+
   if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
@@ -1391,112 +1464,6 @@ export default function DataPage() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {/* Header */}
-      <div className="bg-white shadow-md border-b-4 border-orange-500">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
-          <div className="flex flex-nowrap justify-between items-center gap-4 min-w-0">
-            <div className="flex items-center flex-nowrap gap-4 min-w-0 overflow-x-auto overflow-y-hidden py-1">
-              <button
-                onClick={() => router.push('/dashboard')}
-                className="shrink-0 bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center whitespace-nowrap"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-                Dashboard
-              </button>
-              {selectedTable === 'bookings' && (
-                <label className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 cursor-pointer flex items-center whitespace-nowrap">
-                  📤 Upload Excel
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls"
-                    onChange={handleExcelUpload}
-                    className="hidden"
-                    disabled={loading}
-                  />
-                </label>
-              )}
-              <button
-                onClick={() => router.push('/uploads')}
-                className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center whitespace-nowrap"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Upload History
-              </button>
-              <button
-                onClick={() => router.push('/history')}
-                className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center whitespace-nowrap"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                </svg>
-                History of Edits
-              </button>
-              {selectedTable === 'bookings' && (
-                <>
-                  <button
-                    onClick={() => {
-                      if (!showFilters) {
-                        setPendingFilters({...filters})
-                        setPendingMultiSelectFilters({...multiSelectFilters})
-                        setPendingDateRangeFilters({...dateRangeFilters})
-                      }
-                      setShowFilters(!showFilters)
-                      setOpenDropdown(null)
-                      setOpenDateRangeColumn(null)
-                    }}
-                    className={`shrink-0 whitespace-nowrap px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center ${
-                      showFilters || Object.keys(filters).some(k => filters[k]) || Object.keys(multiSelectFilters).some(k => multiSelectFilters[k]?.length > 0) || Object.keys(dateRangeFilters).some(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim())
-                        ? 'bg-orange-500 text-white hover:bg-orange-600'
-                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                    }`}
-                  >
-                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-                    </svg>
-                    Filters
-                    {(Object.keys(filters).some(k => filters[k]) || Object.keys(multiSelectFilters).some(k => multiSelectFilters[k]?.length > 0) || Object.keys(dateRangeFilters).some(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim())) && (
-                      <span className="ml-2 bg-white text-orange-500 rounded-full px-2 py-0.5 text-xs font-bold">
-                        {Object.keys(filters).filter(k => filters[k]).length + Object.keys(multiSelectFilters).filter(k => multiSelectFilters[k]?.length > 0).length + Object.keys(dateRangeFilters).filter(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim()).length}
-                      </span>
-                    )}
-                  </button>
-                  {showFilters && (
-                    <>
-                      <button
-                        onClick={applyFilters}
-                        className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center whitespace-nowrap"
-                      >
-                        <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                        Apply
-                      </button>
-                      <button
-                        onClick={clearFilters}
-                        className="shrink-0 bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 whitespace-nowrap"
-                      >
-                        Clear
-                      </button>
-                    </>
-                  )}
-                </>
-              )}
-              <span className="shrink-0 text-sm text-gray-600 whitespace-nowrap">{session.user.email}</span>
-              <button
-                onClick={handleSignOut}
-                className="shrink-0 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 whitespace-nowrap"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <div className="px-4 sm:px-6 lg:px-8 py-2">
           {!selectedTable ? (
               <div className="bg-white rounded-lg shadow p-8 text-center">
@@ -1611,7 +1578,7 @@ export default function DataPage() {
                                       type="button"
                                       onClick={() => setOpenDateRangeColumn(openDateRangeColumn === col ? null : col)}
                                       className={`w-full px-3 py-2 text-sm text-left border rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent flex justify-between items-center ${
-                                        hasRange ? 'border-orange-400 bg-orange-50 text-orange-900' : 'border-gray-300 bg-white hover:bg-gray-50'
+                                        hasRange ? 'border-orange-400 bg-orange-50 text-orange-900' : 'border-gray-300 bg-white hover:bg-gray-50 text-gray-500'
                                       }`}
                                     >
                                       <span className="truncate">
@@ -1685,7 +1652,7 @@ export default function DataPage() {
                                   <div className="relative">
                                     <button
                                       onClick={() => setOpenDropdown(openDropdown === col ? null : col)}
-                                      className="w-full px-3 py-2 text-sm text-left border border-gray-300 rounded bg-white hover:bg-gray-50 focus:ring-2 focus:ring-orange-500 focus:border-transparent flex justify-between items-center"
+                                      className={`w-full px-3 py-2 text-sm text-left border border-gray-300 rounded bg-white hover:bg-gray-50 focus:ring-2 focus:ring-orange-500 focus:border-transparent flex justify-between items-center ${selectedValues.length === 0 ? 'text-gray-500' : ''}`}
                                     >
                                       <span className="truncate">
                                         {selectedValues.length > 0 
@@ -1745,7 +1712,7 @@ export default function DataPage() {
                                   placeholder={`Filter ${formatColumnName(col)}...`}
                                   value={pendingFilters[col] || ''}
                                   onChange={(e) => handleFilterChange(col, e.target.value)}
-                                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent placeholder-gray-500"
                                 />
                               </th>
                             )

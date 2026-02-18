@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
+import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
 
 interface EditHistoryRow {
   id: number
@@ -97,6 +98,7 @@ export default function HistoryOfEditsPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [undoingId, setUndoingId] = useState<number | null>(null)
   const router = useRouter()
+  const { setRightContent } = useHeaderRight()
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -234,6 +236,25 @@ export default function HistoryOfEditsPage() {
     }
   }
 
+  useEffect(() => {
+    if (!session?.user) {
+      setRightContent(null)
+      return
+    }
+    setRightContent(
+      <>
+        <span className="shrink-0 inline-flex items-center text-sm text-gray-600 whitespace-nowrap h-[38px]">{session.user?.email}</span>
+        <button
+          onClick={handleSignOut}
+          className="shrink-0 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
+        >
+          Sign Out
+        </button>
+      </>
+    )
+    return () => setRightContent(null)
+  }, [session, setRightContent])
+
   if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
@@ -247,43 +268,7 @@ export default function HistoryOfEditsPage() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <div className="bg-white shadow-md border-b-4 border-orange-500">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center space-x-4">
-              <button
-                onClick={() => router.push('/dashboard')}
-                className="text-orange-500 hover:text-orange-600 p-1 rounded hover:bg-orange-50"
-                title="Dashboard"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-              </button>
-              <button
-                onClick={() => router.push('/data')}
-                className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-1.5 rounded-lg text-sm font-semibold"
-              >
-                Data
-              </button>
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-orange-500 to-orange-700 bg-clip-text text-transparent">
-                History of Edits
-              </h1>
-            </div>
-            <div className="flex items-center space-x-4">
-              <span className="text-sm text-gray-600">{session.user.email}</span>
-              <button
-                onClick={handleSignOut}
-                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="w-full px-4 sm:px-6 lg:px-8 py-8">
         <p className="text-sm text-gray-600 mb-4">
           Manual edits on the green editable (reconciliation) columns only. Excel uploads are not included.
         </p>
@@ -316,14 +301,14 @@ export default function HistoryOfEditsPage() {
               onClick={() => router.push('/data')}
               className="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg font-semibold transition duration-200"
             >
-              Go to Data / Bookings
+              Go to Bookings
             </button>
           </div>
         ) : (
           <div className="bg-white rounded-lg shadow-lg overflow-hidden border-t-4 border-orange-500">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-100 border-b-2 border-gray-200">
+            <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-180px)] min-w-0">
+              <table className="w-full table-fixed min-w-0">
+                <thead className="bg-gray-100 border-b-2 border-gray-200 sticky top-0 z-10 shadow-sm">
                   <tr>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       When
@@ -379,9 +364,9 @@ export default function HistoryOfEditsPage() {
                           edit.new_value
                         )}
                       </td>
-                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                      <td className="px-4 py-3 text-right min-w-0">
                         {edit.undone_at ? (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 bg-gray-100 rounded-lg" title={`Reverted on ${formatTimestamp(edit.undone_at)}`}>
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 bg-gray-100 rounded-lg max-w-full min-w-0 truncate" title={`Reverted on ${formatTimestamp(edit.undone_at)}`}>
                             <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                             </svg>

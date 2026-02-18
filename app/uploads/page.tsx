@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
+import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
 
 interface UploadHistory {
   id: number
@@ -25,6 +26,7 @@ export default function UploadsPage() {
   const [deletingId, setDeletingId] = useState<number | null>(null)
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const router = useRouter()
+  const { setRightContent } = useHeaderRight()
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -163,6 +165,34 @@ export default function UploadsPage() {
     })
   }
 
+  useEffect(() => {
+    if (!session?.user) {
+      setRightContent(null)
+      return
+    }
+    setRightContent(
+      <>
+        <button
+          onClick={() => router.push('/data')}
+          className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
+        >
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+          </svg>
+          Upload Excel
+        </button>
+        <span className="shrink-0 inline-flex items-center text-sm text-gray-600 whitespace-nowrap h-[38px]">{session.user?.email}</span>
+        <button
+          onClick={handleSignOut}
+          className="shrink-0 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
+        >
+          Sign Out
+        </button>
+      </>
+    )
+    return () => setRightContent(null)
+  }, [session, setRightContent])
+
   if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -176,41 +206,6 @@ export default function UploadsPage() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {/* Header */}
-      <div className="bg-white shadow-md border-b-4 border-orange-500">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center space-x-4">
-              <button
-                onClick={() => router.push('/dashboard')}
-                className="text-orange-500 hover:text-orange-600"
-                title="Dashboard"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-              </button>
-              <button
-                onClick={() => router.push('/data')}
-                className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-1.5 rounded-lg text-sm font-semibold"
-              >
-                Data
-              </button>
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-orange-500 to-orange-700 bg-clip-text text-transparent">Upload History</h1>
-            </div>
-            <div className="flex items-center space-x-4">
-              <span className="text-sm text-gray-600">{session.user.email}</span>
-              <button
-                onClick={handleSignOut}
-                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {loading ? (
           <div className="bg-white rounded-lg shadow p-8 text-center">
@@ -242,14 +237,14 @@ export default function UploadsPage() {
               onClick={() => router.push('/data')}
               className="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg font-semibold transition duration-200"
             >
-              Go to Data / Bookings
+              Go to Bookings
             </button>
           </div>
         ) : (
-          <div className="bg-white rounded-lg shadow-lg overflow-hidden border-t-4 border-orange-500">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-100 border-b-2 border-gray-200">
+          <div className="bg-white rounded-lg shadow-lg border-t-4 border-orange-500">
+            <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-180px)]">
+              <table className="w-full border-collapse">
+                <thead className="bg-gray-100 border-b-2 border-gray-200 sticky top-0 z-10 shadow-sm">
                   <tr>
                     <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
                       ID
