@@ -98,11 +98,11 @@ export default function UploadsPage() {
 
   const handleDeleteUpload = async (upload: UploadHistory) => {
     if (!confirm(
-      `Are you sure you want to permanently delete this upload?\n\n` +
+      `Are you sure you want to delete this upload?\n\n` +
       `File: ${upload.file_name}\n` +
       `Sheet: ${upload.sheet_name}\n` +
       `Rows: ${upload.rows_uploaded}\n\n` +
-      `This will permanently remove all ${upload.rows_uploaded} booking records from this upload and remove the upload from history. This cannot be undone.`
+      `This will permanently remove all ${upload.rows_uploaded} booking records. The upload will remain in history as cancelled (grayed out).`
     )) {
       return
     }
@@ -122,16 +122,16 @@ export default function UploadsPage() {
         return
       }
 
-      // Permanently delete the upload_history row so it no longer appears in the list
+      // Soft-delete: mark upload as cancelled so it stays visible (grayed out) in history
       const { error: historyError } = await supabase
         .from('upload_history')
-        .delete()
+        .update({ cancelled_at: new Date().toISOString() })
         .eq('id', upload.id)
 
       if (historyError) {
-        alert(`Error removing upload from history: ${historyError.message}`)
+        alert(`Error marking upload as cancelled: ${historyError.message}`)
       } else {
-        alert(`✅ Upload and all associated bookings have been permanently removed.`)
+        alert(`✅ Upload and all associated bookings have been removed. The upload remains in history as cancelled.`)
         fetchUploads()
       }
     } catch (error: any) {
@@ -173,7 +173,8 @@ export default function UploadsPage() {
     setRightContent(
       <>
         <button
-          onClick={() => router.push('/data')}
+          type="button"
+          onClick={() => router.push('/data?openUpload=1')}
           className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
         >
           <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -246,7 +247,7 @@ export default function UploadsPage() {
               <table className="w-full border-collapse">
                 <thead className="bg-gray-100 border-b-2 border-gray-200 sticky top-0 z-10 shadow-sm">
                   <tr>
-                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                       ID
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -255,7 +256,7 @@ export default function UploadsPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Sheet
                     </th>
-                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Rows
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -280,7 +281,7 @@ export default function UploadsPage() {
                         key={upload.id}
                         className={isCancelled ? 'bg-gray-100 text-gray-500' : 'hover:bg-orange-50'}
                       >
-                        <td className="px-6 py-4 text-center">
+                        <td className="px-6 py-4 text-right">
                           <div className={`text-sm font-mono font-semibold ${isCancelled ? 'text-gray-500' : 'text-gray-700'}`}>
                             #{upload.id}
                           </div>
@@ -293,7 +294,7 @@ export default function UploadsPage() {
                         <td className="px-6 py-4">
                           <div className={`text-sm ${isCancelled ? 'text-gray-500' : 'text-gray-900'}`}>{upload.sheet_name}</div>
                         </td>
-                        <td className="px-6 py-4 text-center">
+                        <td className="px-6 py-4 text-right">
                           <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${isCancelled ? 'bg-gray-200 text-gray-600' : 'bg-green-100 text-green-800'}`}>
                             {upload.rows_uploaded}
                           </span>

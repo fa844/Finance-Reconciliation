@@ -18,6 +18,13 @@ export default function SignUp() {
     setError(null)
     setLoading(true)
 
+    const allowedDomain = '@zuzuhs.com'
+    if (!email.toLowerCase().trim().endsWith(allowedDomain)) {
+      setError('We only accept @ZUZUHS.com accounts.')
+      setLoading(false)
+      return
+    }
+
     const { error } = await supabase.auth.signUp({
       email,
       password,

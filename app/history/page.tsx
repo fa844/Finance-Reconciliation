@@ -62,9 +62,10 @@ function computeFormulaColumns(row: Record<string, unknown>): { balance: number 
     return Number.isNaN(n) ? null : n
   }
   const netAmount = parseNum(row?.net_amount_by_zuzu)
+  const amountReceived = parseNum(row?.amount_received)
   const totalSubmitted = parseNum(row?.total_amount_submitted)
   const totalReceived = parseNum(row?.total_amount_received)
-  const balance = (netAmount != null && totalSubmitted != null) ? netAmount - totalSubmitted : null
+  const balance = (netAmount != null && amountReceived != null) ? netAmount - amountReceived : null
   const reconciled_amount_check = (totalSubmitted != null && totalReceived != null) ? totalSubmitted - totalReceived : null
   return { balance, reconciled_amount_check }
 }
@@ -350,14 +351,14 @@ export default function HistoryOfEditsPage() {
                       <td className="px-4 py-3 text-sm text-green-700 font-medium">
                         {formatColumnName(edit.column_name)}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-600 max-w-xs truncate" title={edit.old_value ?? ''}>
+                      <td className={`px-4 py-3 text-sm text-gray-600 max-w-xs truncate ${NUMERIC_COLUMNS.has(edit.column_name) ? 'text-right' : ''}`} title={edit.old_value ?? ''}>
                         {edit.old_value === '' || edit.old_value == null ? (
                           <span className="text-gray-400 italic">empty</span>
                         ) : (
                           edit.old_value
                         )}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-900 max-w-xs truncate font-medium" title={edit.new_value ?? ''}>
+                      <td className={`px-4 py-3 text-sm text-gray-900 max-w-xs truncate font-medium ${NUMERIC_COLUMNS.has(edit.column_name) ? 'text-right' : ''}`} title={edit.new_value ?? ''}>
                         {edit.new_value === '' || edit.new_value == null ? (
                           <span className="text-gray-400 italic">empty</span>
                         ) : (

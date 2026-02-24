@@ -4,23 +4,6 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  Legend,
-  LineChart,
-  Line,
-} from 'recharts'
-
-const CHART_COLORS = ['#ea580c', '#c2410c', '#9a3412', '#7c2d12', '#f97316', '#fb923c', '#fdba74']
 
 interface BookingRow {
   id: number
@@ -172,7 +155,7 @@ function MultiSelectFilter({
 
 export default function Dashboard() {
   const [session, setSession] = useState<any>(null)
-  const [bookings, setBookings] = useState<BookingRow[]>([])
+  const [filteredCount, setFilteredCount] = useState<number>(0)
   const [loading, setLoading] = useState(true)
   const [filterCountry, setFilterCountry] = useState<string[]>([])
   const [filterChannel, setFilterChannel] = useState<string[]>([])
@@ -180,8 +163,6 @@ export default function Dashboard() {
   const [filterStatus, setFilterStatus] = useState<string[]>([])
   const [dateFrom, setDateFrom] = useState<string>('')
   const [dateTo, setDateTo] = useState<string>('')
-  const [uploadCount, setUploadCount] = useState<number>(0)
-  const [editCount, setEditCount] = useState<number>(0)
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; channels: string[]; currencies: string[]; statuses: string[] }>({ countries: [], channels: [], currencies: [], statuses: [] })
   const [openDropdown, setOpenDropdown] = useState<string | null>(null)
   const router = useRouter()
@@ -193,6 +174,7 @@ export default function Dashboard() {
         router.push('/login')
       } else {
         setSession(session)
+        fetchFilterOptions()
         fetchDashboardData()
       }
     })
@@ -207,13 +189,58 @@ export default function Dashboard() {
     return () => subscription.unsubscribe()
   }, [router])
 
+  const fetchFilterOptions = async () => {
+    try {
+      const countries = new Set<string>()
+      const channels = new Set<string>()
+      const currencies = new Set<string>()
+      const statuses = new Set<string>()
+      const pageSize = 1000
+      let from = 0
+      let hasMore = true
+
+      while (hasMore) {
+        const { data: page, error } = await supabase
+          .from('bookings')
+          .select('country, channel, currency, status')
+          .range(from, from + pageSize - 1)
+
+        if (error) {
+          console.error('Error fetching filter options:', error)
+          break
+        }
+        const rows = (page ?? []) as { country?: string | null; channel?: string | null; currency?: string | null; status?: string | null }[]
+        rows.forEach((r) => {
+          const c = (r.country ?? '').toString().trim()
+          if (c) countries.add(c)
+          const ch = (r.channel ?? '').toString().trim()
+          if (ch) channels.add(ch)
+          const cur = (r.currency ?? '').toString().trim()
+          if (cur) currencies.add(cur)
+          const s = (r.status ?? '').toString().trim()
+          if (s) statuses.add(s)
+        })
+        hasMore = rows.length === pageSize
+        from += pageSize
+      }
+
+      setFilterOptions({
+        countries: Array.from(countries).sort(),
+        channels: Array.from(channels).sort(),
+        currencies: Array.from(currencies).sort(),
+        statuses: Array.from(statuses).sort(),
+      })
+    } catch (e) {
+      console.error('Error loading filter options:', e)
+    }
+  }
+
   const fetchDashboardData = async () => {
     setLoading(true)
     try {
       let query = supabase
         .from('bookings')
-        .select('id, country, channel, currency, status, total_amount_submitted, total_amount_received, amount_received, net_amount_by_zuzu, balance, payment_request_date, payment_date, arrival_date, created_at')
-        .limit(10000)
+        .select('*', { count: 'exact', head: true })
 
       if (filterCountry.length > 0) query = query.in('country', filterCountry)
       if (filterChannel.length > 0) query = query.in('channel', filterChannel)
@@ -222,32 +249,17 @@ export default function Dashboard() {
       if (dateFrom) query = query.gte('created_at', `${dateFrom}T00:00:00.000Z`)
       if (dateTo) query = query.lte('created_at', `${dateTo}T23:59:59.999Z`)
 
-      const { data: bookingData, error } = await query
+      const { count, error } = await query
 
       if (error) {
-        console.error('Error fetching bookings:', error)
-        setBookings([])
+        console.error('Error fetching bookings count:', error)
+        setFilteredCount(0)
       } else {
-        const data = (bookingData as BookingRow[]) || []
-        setBookings(data)
-        const hasNoFilters = filterCountry.length === 0 && filterChannel.length === 0 && filterCurrency.length === 0 && filterStatus.length === 0
-        if (hasNoFilters && data.length > 0) {
-          const countries = Array.from(new Set(data.map((r) => (r.country ?? '').toString().trim()).filter(Boolean))).sort()
-          const channels = Array.from(new Set(data.map((r) => (r.channel ?? '').toString().trim()).filter(Boolean))).sort()
-          const currencies = Array.from(new Set(data.map((r) => (r.currency ?? '').toString().trim()).filter(Boolean))).sort()
-          const statuses = Array.from(new Set(data.map((r) => (r.status ?? '').toString().trim()).filter(Boolean))).sort()
-          setFilterOptions({ countries, channels, currencies, statuses })
-        }
+        setFilteredCount(count ?? 0)
       }
-
-      const { count: uploadCnt } = await supabase.from('upload_history').select('*', { count: 'exact', head: true })
-      setUploadCount(uploadCnt ?? 0)
-
-      const { count: editCnt } = await supabase.from('edit_history').select('*', { count: 'exact', head: true })
-      setEditCount(editCnt ?? 0)
     } catch (e) {
       console.error(e)
-      setBookings([])
+      setFilteredCount(0)
     }
     setLoading(false)
   }
@@ -256,83 +268,6 @@ export default function Dashboard() {
     if (session) fetchDashboardData()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch when filters change
   }, [session, dateFrom, dateTo, JSON.stringify(filterCountry), JSON.stringify(filterChannel), JSON.stringify(filterCurrency), JSON.stringify(filterStatus)])
-
-  const parseNum = (v: unknown): number => {
-    if (v == null || v === '') return 0
-    const n = Number(v)
-    return Number.isNaN(n) ? 0 : n
-  }
-
-  const kpis = useMemo(() => {
-    const totalSubmitted = bookings.reduce((s, r) => s + parseNum(r.total_amount_submitted), 0)
-    const totalReceived = bookings.reduce((s, r) => s + parseNum(r.total_amount_received ?? r.amount_received), 0)
-    const totalBalance = bookings.reduce((s, r) => s + parseNum(r.balance), 0)
-    return {
-      count: bookings.length,
-      totalSubmitted,
-      totalReceived,
-      totalBalance,
-      unreconciled: totalSubmitted - totalReceived,
-    }
-  }, [bookings])
-
-  const byCountry = useMemo(() => {
-    const map = new Map<string, { count: number; amount: number }>()
-    bookings.forEach((r) => {
-      const key = (r.country ?? 'Unknown').toString().trim() || 'Unknown'
-      const cur = map.get(key) ?? { count: 0, amount: 0 }
-      cur.count += 1
-      cur.amount += parseNum(r.total_amount_submitted)
-      map.set(key, cur)
-    })
-    return Array.from(map.entries())
-      .map(([name, v]) => ({ name, count: v.count, amount: Math.round(v.amount * 100) / 100 }))
-      .sort((a, b) => b.amount - a.amount)
-      .slice(0, 10)
-  }, [bookings])
-
-  const byChannel = useMemo(() => {
-    const map = new Map<string, number>()
-    bookings.forEach((r) => {
-      const key = (r.channel ?? 'Unknown').toString().trim() || 'Unknown'
-      map.set(key, (map.get(key) ?? 0) + parseNum(r.total_amount_submitted))
-    })
-    return Array.from(map.entries())
-      .map(([name, value]) => ({ name, value: Math.round(value * 100) / 100 }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 8)
-  }, [bookings])
-
-  const byStatus = useMemo(() => {
-    const map = new Map<string, number>()
-    bookings.forEach((r) => {
-      const key = (r.status ?? 'Unknown').toString().trim() || 'Unknown'
-      map.set(key, (map.get(key) ?? 0) + 1)
-    })
-    return Array.from(map.entries()).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value)
-  }, [bookings])
-
-  const byMonth = useMemo(() => {
-    const map = new Map<string, { submitted: number; received: number; count: number }>()
-    bookings.forEach((r) => {
-      const raw = r.payment_request_date ?? r.created_at ?? ''
-      const month = raw ? String(raw).slice(0, 7) : 'No date'
-      const cur = map.get(month) ?? { submitted: 0, received: 0, count: 0 }
-      cur.submitted += parseNum(r.total_amount_submitted)
-      cur.received += parseNum(r.total_amount_received ?? r.amount_received)
-      cur.count += 1
-      map.set(month, cur)
-    })
-    return Array.from(map.entries())
-      .map(([month, v]) => ({
-        month,
-        submitted: Math.round(v.submitted * 100) / 100,
-        received: Math.round(v.received * 100) / 100,
-        count: v.count,
-      }))
-      .sort((a, b) => a.month.localeCompare(b.month))
-      .slice(-12)
-  }, [bookings])
 
   const filterCountryOptions = useMemo(() => [...new Set([...filterCountry, ...filterOptions.countries])].sort(), [filterCountry, filterOptions.countries])
   const filterChannelOptions = useMemo(() => [...new Set([...filterChannel, ...filterOptions.channels])].sort(), [filterChannel, filterOptions.channels])
@@ -461,149 +396,12 @@ export default function Dashboard() {
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500" />
           </div>
         ) : (
-          <>
-            {/* KPI cards */}
-            <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <p className="text-sm font-medium text-gray-500">Bookings (filtered)</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">{kpis.count.toLocaleString()}</p>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <p className="text-sm font-medium text-gray-500">Total submitted</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">{kpis.totalSubmitted.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <p className="text-sm font-medium text-gray-500">Total received</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">{kpis.totalReceived.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <p className="text-sm font-medium text-gray-500">Unreconciled</p>
-                <p className="text-2xl font-bold text-orange-600 mt-1">{kpis.unreconciled.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <p className="text-sm font-medium text-gray-500">Uploads / Edits</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">{uploadCount} / {editCount}</p>
-              </div>
-            </section>
-
-            {/* Charts row */}
-            <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <h3 className="text-base font-semibold text-gray-800 mb-4">Amount by month</h3>
-                <div className="h-72">
-                  {byMonth.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={byMonth} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                        <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-                        <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => (v >= 1000 ? `${v / 1000}k` : v)} />
-                        <Tooltip formatter={(v: number) => [v.toLocaleString(), '']} labelFormatter={(l) => `Month: ${l}`} />
-                        <Legend />
-                        <Line type="monotone" dataKey="submitted" stroke="#ea580c" name="Submitted" strokeWidth={2} dot={{ r: 3 }} />
-                        <Line type="monotone" dataKey="received" stroke="#22c55e" name="Received" strokeWidth={2} dot={{ r: 3 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <p className="text-gray-500 text-sm flex items-center justify-center h-full">No date data</p>
-                  )}
-                </div>
-              </div>
-
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <h3 className="text-base font-semibold text-gray-800 mb-4">Amount by channel</h3>
-                <div className="h-72">
-                  {byChannel.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={byChannel} layout="vertical" margin={{ top: 5, right: 30, left: 80, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                        <XAxis type="number" tickFormatter={(v) => (v >= 1000 ? `${v / 1000}k` : v)} />
-                        <YAxis type="category" dataKey="name" width={75} tick={{ fontSize: 10 }} />
-                        <Tooltip formatter={(v: number) => [v.toLocaleString(), 'Amount']} />
-                        <Bar dataKey="value" fill="#ea580c" radius={[0, 4, 4, 0]} name="Amount" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <p className="text-gray-500 text-sm flex items-center justify-center h-full">No channel data</p>
-                  )}
-                </div>
-              </div>
-            </section>
-
-            <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <h3 className="text-base font-semibold text-gray-800 mb-4">Bookings by status</h3>
-                <div className="h-72">
-                  {byStatus.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={byStatus}
-                          dataKey="value"
-                          nameKey="name"
-                          cx="50%"
-                          cy="50%"
-                          outerRadius={100}
-                          label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                        >
-                          {byStatus.map((_, i) => (
-                            <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                          ))}
-                        </Pie>
-                        <Tooltip formatter={(v: number) => [v.toLocaleString(), 'Count']} />
-                        <Legend />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <p className="text-gray-500 text-sm flex items-center justify-center h-full">No status data</p>
-                  )}
-                </div>
-              </div>
-
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <h3 className="text-base font-semibold text-gray-800 mb-4">Top countries by amount</h3>
-                <div className="h-72">
-                  {byCountry.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={byCountry} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                        <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                        <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => (v >= 1000 ? `${v / 1000}k` : v)} />
-                        <Tooltip formatter={(v: number) => [v.toLocaleString(), 'Amount']} />
-                        <Bar dataKey="amount" fill="#c2410c" radius={[4, 4, 0, 0]} name="Amount" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <p className="text-gray-500 text-sm flex items-center justify-center h-full">No country data</p>
-                  )}
-                </div>
-              </div>
-            </section>
-
-            {/* Summary table */}
-            <section className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <h3 className="text-base font-semibold text-gray-800 p-4 border-b border-gray-200">Top countries (count & amount)</h3>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="text-left py-3 px-4 font-semibold text-gray-700">Country</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Bookings</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Total submitted</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {byCountry.slice(0, 15).map((row) => (
-                      <tr key={row.name} className="border-b border-gray-100 hover:bg-gray-50">
-                        <td className="py-2 px-4">{row.name}</td>
-                        <td className="py-2 px-4 text-right">{row.count.toLocaleString()}</td>
-                        <td className="py-2 px-4 text-right">{row.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </>
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+              <p className="text-sm font-medium text-gray-500">Bookings filtered</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{filteredCount.toLocaleString()}</p>
+            </div>
+          </section>
         )}
       </main>
     </div>

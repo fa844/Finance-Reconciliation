@@ -53,6 +53,7 @@ export default function DataPage() {
   const [anchorCell, setAnchorCell] = useState<{ rowIndex: number; column: string } | null>(null)
   const [cellSelection, setCellSelection] = useState<{ column: string; startRowIndex: number; endRowIndex: number } | null>(null)
   const [lastClickedCell, setLastClickedCell] = useState<{ rowIndex: number; column: string } | null>(null)
+  const [downloadingCsv, setDownloadingCsv] = useState(false)
   const router = useRouter()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   // Upload progress and cancellation
@@ -370,6 +371,57 @@ export default function DataPage() {
       alert(`Error: ${error.message}`)
     }
     setLoading(false)
+  }
+
+  const csvEscape = (v: any): string => {
+    const s = v == null || v === '' || v === 'null' || v === 'undefined' ? '' : String(v)
+    if (/[,"\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+    return s
+  }
+
+  const downloadBookingsCsv = async () => {
+    if (selectedTable !== 'bookings') return
+    setDownloadingCsv(true)
+    try {
+      const batchSize = 1000
+      let allData: any[] = []
+      let from = 0
+      while (true) {
+        const { data, error } = await supabase
+          .from('bookings')
+          .select('*')
+          .order('id', { ascending: true })
+          .range(from, from + batchSize - 1)
+        if (error) {
+          alert(`Error fetching bookings: ${error.message}`)
+          return
+        }
+        if (!data || data.length === 0) break
+        allData = allData.concat(data)
+        if (data.length < batchSize) break
+        from += batchSize
+      }
+      if (allData.length === 0) {
+        alert('No bookings to export.')
+        return
+      }
+      const cols = Object.keys(allData[0]).filter((c: string) => c !== 'total_amount_eceived')
+      const header = cols.map(c => csvEscape(c)).join(',')
+      const rows = allData.map(row => cols.map(c => csvEscape(row[c])).join(','))
+      const csv = [header, ...rows].join('\r\n')
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+      const ts = new Date()
+      const timestamp = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}_${String(ts.getHours()).padStart(2, '0')}-${String(ts.getMinutes()).padStart(2, '0')}-${String(ts.getSeconds()).padStart(2, '0')}`
+      const filename = `bookings_${timestamp}.csv`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      setDownloadingCsv(false)
+    }
   }
 
   const handleTableSelect = (tableName: string) => {
@@ -1392,6 +1444,29 @@ export default function DataPage() {
         {selectedTable === 'bookings' && (
           <>
             <button
+              type="button"
+              onClick={downloadBookingsCsv}
+              disabled={downloadingCsv}
+              className="shrink-0 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
+            >
+              {downloadingCsv ? (
+                <>
+                  <svg className="w-4 h-4 mr-2 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  Downloading…
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Download CSV
+                </>
+              )}
+            </button>
+            <button
               onClick={() => {
                 if (!showFilters) {
                   setPendingFilters({...filters})
@@ -1449,7 +1524,7 @@ export default function DataPage() {
       </>
     )
     return () => setRightContent(null)
-  }, [session, selectedTable, showFilters, filters, multiSelectFilters, dateRangeFilters, loading, setRightContent])
+  }, [session, selectedTable, showFilters, filters, multiSelectFilters, dateRangeFilters, loading, downloadingCsv, setRightContent])
 
   if (!session) {
     return (
