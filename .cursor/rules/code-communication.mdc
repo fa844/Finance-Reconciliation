@@ -1,0 +1,9 @@
+---
+description: How to communicate when writing or explaining code
+alwaysApply: true
+---
+
+# Code communication
+
+- **One step at a time**: Give instructions one step at a time. Do not bundle multiple steps into a single message unless the user asks for a full sequence.
+- **Technical level**: Explain things as if talking to a relative technical beginner. Avoid jargon where possible; when using technical terms, briefly clarify them. Prefer short, clear sentences.

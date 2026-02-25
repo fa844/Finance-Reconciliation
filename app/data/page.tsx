@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import * as XLSX from 'xlsx'
 import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
 
@@ -48,6 +48,8 @@ export default function DataPage() {
   const [filteredPageSize] = useState(100)
   const [totalFilteredCount, setTotalFilteredCount] = useState<number | null>(null)
   const [savedScrollPosition, setSavedScrollPosition] = useState<number | null>(null)
+  // Unfiltered distinct values per multi-select column (so dropdown always shows all options)
+  const [distinctColumnValues, setDistinctColumnValues] = useState<Record<string, string[]>>({})
   const [editingCell, setEditingCell] = useState<{rowIndex: number, column: string} | null>(null)
   const [editingValue, setEditingValue] = useState<string>('')
   const [anchorCell, setAnchorCell] = useState<{ rowIndex: number; column: string } | null>(null)
@@ -55,7 +57,17 @@ export default function DataPage() {
   const [lastClickedCell, setLastClickedCell] = useState<{ rowIndex: number; column: string } | null>(null)
   const [downloadingCsv, setDownloadingCsv] = useState(false)
   const router = useRouter()
+  const searchParams = useSearchParams()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const excelFileInputRef = useRef<HTMLInputElement>(null)
+  // When user blurs a filter input by clicking elsewhere (e.g. header), ignore that click so we don't trigger sort/refetch
+  const filterInputJustBlurredRef = useRef(false)
+  // Refs holding latest pending filter values so Apply works on first click (avoids stale closure before re-render)
+  const pendingFiltersRef = useRef<{[key: string]: string}>({})
+  const pendingMultiSelectFiltersRef = useRef<{[key: string]: string[]}>({})
+  const pendingDateRangeFiltersRef = useRef<{[key: string]: { from: string; to: string }}>({})
+  // Latest sort (ref so rapid header clicks see current sort and toggle direction correctly)
+  const lastSortRef = useRef<{ column: string | null; direction: 'asc' | 'desc' }>({ column: null, direction: 'asc' })
   // Upload progress and cancellation
   const [uploadPhase, setUploadPhase] = useState<'idle' | 'parsing' | 'checking_duplicates' | 'preparing' | 'inserting' | 'linking' | 'saving_file'>('idle')
   const [uploadProgressDetail, setUploadProgressDetail] = useState<string>('')
@@ -68,6 +80,19 @@ export default function DataPage() {
   // Columns that are dates (show date range picker instead of text filter)
   const isDateColumn = (col: string): boolean =>
     col.includes('date') || col === 'created_at' || col === 'updated_at'
+
+  // Columns that are pure numbers: right-align for display. Exclude the two confirmation number columns so users can continue to add digits on the left.
+  const isNumericColumnForDisplay = (col: string): boolean =>
+    col !== 'zuzu_room_confirmation_number' &&
+    col !== 'channel_booking_confirmation_number' &&
+    (col === 'id' ||
+      col === 'upload_id' ||
+      col === 'number_of_room_nights' ||
+      col.includes('amount') ||
+      col === 'balance' ||
+      col === 'reconciled_amount_check' ||
+      col === 'transmission_queue_id' ||
+      col === 'reference_number')
 
   // Format timestamp from ISO 8601 to simple format (YYYY-MM-DD HH:MM:SS)
   const formatTimestamp = (timestamp: string | null): string => {
@@ -171,9 +196,13 @@ export default function DataPage() {
       const target = event.target as Element
       if (openDropdown && !target.closest('.relative')) {
         setOpenDropdown(null)
+        filterInputJustBlurredRef.current = true
+        setTimeout(() => { filterInputJustBlurredRef.current = false }, 100)
       }
       if (openDateRangeColumn && !target.closest('.date-range-filter-wrap')) {
         setOpenDateRangeColumn(null)
+        filterInputJustBlurredRef.current = true
+        setTimeout(() => { filterInputJustBlurredRef.current = false }, 100)
       }
     }
 
@@ -181,13 +210,24 @@ export default function DataPage() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [openDropdown, openDateRangeColumn])
 
-  // Restore scroll position after filtering
+  // Restore horizontal scroll after filtering or sorting
   useEffect(() => {
     if (!loading && savedScrollPosition !== null && scrollContainerRef.current) {
       scrollContainerRef.current.scrollLeft = savedScrollPosition
       setSavedScrollPosition(null)
     }
   }, [loading, savedScrollPosition])
+
+  // When navigating from Uploads page with ?openUpload=1, open the file picker
+  useEffect(() => {
+    if (!session || searchParams.get('openUpload') !== '1') return
+    if (selectedTable !== 'bookings') return
+    const t = setTimeout(() => {
+      excelFileInputRef.current?.click()
+      router.replace('/data', { scroll: false })
+    }, 100)
+    return () => clearTimeout(t)
+  }, [session, selectedTable, searchParams, router])
 
   const fetchTables = async () => {
     try {
@@ -232,7 +272,9 @@ export default function DataPage() {
       textFilters?: {[key: string]: string}
       multiFilters?: {[key: string]: string[]}
       dateRangeFilters?: {[key: string]: { from: string; to: string }}
-    }
+    },
+    sortColumnOverride?: string | null,
+    sortDirectionOverride?: 'asc' | 'desc'
   ) => {
     setLoading(true)
     try {
@@ -251,8 +293,8 @@ export default function DataPage() {
         .from(tableName)
         .select('*')
 
-      // Columns that are numeric (bigint/int) - use eq() not ilike() to avoid "operator does not exist: bigint ~~* unknown"
-      const numericColumns = ['id', 'upload_id']
+      // Columns that are numeric (bigint/int) - use eq() not ilike() to avoid "operator does not exist: integer ~~* unknown"
+      const numericColumns = ['id', 'upload_id', 'number_of_room_nights']
 
       // Apply filters if requested
       if (applyFilters) {
@@ -277,10 +319,12 @@ export default function DataPage() {
           }
         })
 
-        // Apply multi-select filters
-        Object.keys(activeMultiFilters).forEach(column => {
-          const selectedValues = activeMultiFilters[column]
-          if (selectedValues && selectedValues.length > 0) {
+        // Apply multi-select filters (only for known multi-select columns; normalize values for exact match)
+        multiSelectColumns.forEach(column => {
+          const rawValues = activeMultiFilters[column]
+          if (!rawValues?.length) return
+          const selectedValues = [...new Set(rawValues.map((v: string) => String(v).trim()).filter(Boolean))]
+          if (selectedValues.length > 0) {
             countQuery = countQuery.in(column, selectedValues)
             dataQuery = dataQuery.in(column, selectedValues)
           }
@@ -311,6 +355,11 @@ export default function DataPage() {
         setTotalRecords(count || 0)
       }
 
+      // Apply server-side sort so ordering is over the full dataset, not just loaded rows
+      const orderCol = sortColumnOverride ?? sortColumn ?? 'id'
+      const orderAsc = (sortColumnOverride ?? sortColumn) ? ((sortDirectionOverride ?? sortDirection) === 'asc') : true
+      dataQuery = dataQuery.order(orderCol, { ascending: orderAsc })
+
       // Fetch paginated data
       const from = (page - 1) * pageSize
       const to = from + pageSize - 1
@@ -321,12 +370,27 @@ export default function DataPage() {
         console.error('Error fetching table data:', error)
         alert(`Error: ${error.message}`)
       } else if (data && data.length > 0) {
+        // Client-side enforce multi-select filters so displayed rows always match selected values
+        let rowsToSet = data
+        if (applyFilters) {
+          for (const column of multiSelectColumns) {
+            const rawValues = activeMultiFilters[column]
+            if (!rawValues?.length) continue
+            const allowedSet = new Set(rawValues.map((v: string) => String(v).trim()).filter(Boolean))
+            if (allowedSet.size === 0) continue
+            rowsToSet = rowsToSet.filter((row: Record<string, unknown>) => {
+              const val = row[column]
+              const s = (val == null || val === undefined) ? '' : String(val).trim()
+              return allowedSet.has(s)
+            })
+          }
+        }
         if (append) {
           // Load more mode - append to existing data
-          setTableData(prev => [...prev, ...data])
+          setTableData(prev => [...prev, ...rowsToSet])
         } else {
           // Pagination mode - replace data
-          setTableData(data)
+          setTableData(rowsToSet)
         }
         // Reorder columns: booking data first, then reconciliation fields, then system fields
         // Exclude typo/duplicate columns that should not be shown (keep "Total Amount Received", hide "Total Amount eceived")
@@ -372,6 +436,42 @@ export default function DataPage() {
     }
     setLoading(false)
   }
+
+  // Fetch unfiltered distinct values for multi-select columns so the filter dropdown always shows all options
+  const fetchDistinctColumnValues = async (table: string) => {
+    const result: Record<string, string[]> = {}
+    for (const col of multiSelectColumns) {
+      try {
+        // Prefer RPC that returns all distinct values; fallback to sampling first 10k rows if RPC not deployed
+        const { data: rpcData, error: rpcError } = await supabase.rpc('get_distinct_column_values', {
+          p_table_name: table,
+          p_column_name: col,
+        })
+        if (!rpcError && Array.isArray(rpcData)) {
+          const raw = rpcData.map(v => (typeof v === 'string' ? v : (v && typeof v === 'object' ? Object.values(v)[0] : null)))
+          result[col] = raw.filter((v): v is string => typeof v === 'string').map(v => String(v).trim()).filter(Boolean).sort()
+        } else {
+          const limit = 10000
+          const { data, error } = await supabase
+            .from(table)
+            .select(col)
+            .limit(limit)
+          if (error) continue
+          const values = (data ?? [])
+            .map(row => String((row as Record<string, unknown>)[col] ?? '').trim())
+            .filter(Boolean)
+          result[col] = Array.from(new Set(values)).sort()
+        }
+      } catch {
+        result[col] = []
+      }
+    }
+    setDistinctColumnValues(prev => ({ ...prev, ...result }))
+  }
+
+  useEffect(() => {
+    if (selectedTable) fetchDistinctColumnValues(selectedTable)
+  }, [selectedTable])
 
   const csvEscape = (v: any): string => {
     const s = v == null || v === '' || v === 'null' || v === 'undefined' ? '' : String(v)
@@ -430,8 +530,11 @@ export default function DataPage() {
     setIsAddingNew(false)
     setSortColumn(null)
     setSortDirection('asc')
+    lastSortRef.current = { column: null, direction: 'asc' }
     setFilters({})
     setMultiSelectFilters({})
+    setPendingFilters({})
+    setPendingMultiSelectFilters({})
     setDateRangeFilters({})
     setPendingDateRangeFilters({})
     setShowFilters(false)
@@ -439,6 +542,7 @@ export default function DataPage() {
     setOpenDateRangeColumn(null)
     setCurrentPage(1)
     setTableData([])
+    setDistinctColumnValues({})
     fetchTableData(tableName, 1)
   }
 
@@ -464,46 +568,60 @@ export default function DataPage() {
   }
 
   const handleSort = (column: string) => {
-    if (sortColumn === column) {
-      // Toggle direction if same column
-      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc')
-    } else {
-      // New column, default to ascending
-      setSortColumn(column)
-      setSortDirection('asc')
+    // Use ref so rapid clicks see latest sort and toggle direction correctly (state updates are async)
+    const { column: lastCol, direction: lastDir } = lastSortRef.current
+    const newDirection = lastCol === column
+      ? (lastDir === 'asc' ? 'desc' : 'asc')
+      : 'asc'
+    lastSortRef.current = { column, direction: newDirection }
+    // Keep horizontal scroll so same columns stay visible (same as when applying filters)
+    setSavedScrollPosition(scrollContainerRef.current?.scrollLeft ?? 0)
+    setSortColumn(column)
+    setSortDirection(newDirection)
+    // Refetch first page with new sort so we get top 100 from entire DB
+    const hasActiveFilters = Object.keys(filters).some(k => filters[k]) ||
+      Object.keys(multiSelectFilters).some(k => multiSelectFilters[k]?.length > 0) ||
+      Object.keys(dateRangeFilters).some(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim())
+    if (selectedTable) {
+      setCurrentPage(1)
+      fetchTableData(selectedTable, 1, false, hasActiveFilters, undefined, column, newDirection)
     }
   }
 
   const handleFilterChange = (column: string, value: string) => {
-    setPendingFilters(prev => ({
-      ...prev,
-      [column]: value
-    }))
+    const next = { ...pendingFilters, [column]: value }
+    setPendingFilters(next)
+    pendingFiltersRef.current = next
   }
 
   const applyFilters = () => {
+    // Use refs so we always have the latest pending values (avoids stale closure when user clicks Apply before re-render)
+    const textFilters = pendingFiltersRef.current ?? pendingFilters
+    const multiFilters = pendingMultiSelectFiltersRef.current ?? pendingMultiSelectFilters
+    const dateFilters = pendingDateRangeFiltersRef.current ?? pendingDateRangeFilters
+
     // Save current scroll position
     setSavedScrollPosition(scrollContainerRef.current?.scrollLeft || 0)
-    
+
     // Copy pending filters to actual filters
-    setFilters(pendingFilters)
-    setMultiSelectFilters(pendingMultiSelectFilters)
-    setDateRangeFilters(pendingDateRangeFilters)
+    setFilters(textFilters)
+    setMultiSelectFilters(multiFilters)
+    setDateRangeFilters(dateFilters)
     setOpenDateRangeColumn(null)
     setCurrentPage(1)
     setFilteredPage(1)
-    
+
     // Trigger data fetch with filters
     if (selectedTable) {
-      const hasActiveFilters = Object.keys(pendingFilters).some(k => pendingFilters[k]) || 
-                              Object.keys(pendingMultiSelectFilters).some(k => pendingMultiSelectFilters[k]?.length > 0) ||
-                              Object.keys(pendingDateRangeFilters).some(k => pendingDateRangeFilters[k]?.from?.trim() || pendingDateRangeFilters[k]?.to?.trim())
+      const hasActiveFilters = Object.keys(textFilters).some(k => textFilters[k]) ||
+                              Object.keys(multiFilters).some(k => multiFilters[k]?.length > 0) ||
+                              Object.keys(dateFilters).some(k => dateFilters[k]?.from?.trim() || dateFilters[k]?.to?.trim())
       fetchTableData(
-        selectedTable, 
-        1, 
-        false, 
+        selectedTable,
+        1,
+        false,
         hasActiveFilters,
-        { textFilters: pendingFilters, multiFilters: pendingMultiSelectFilters, dateRangeFilters: pendingDateRangeFilters }
+        { textFilters, multiFilters, dateRangeFilters: dateFilters }
       )
     }
   }
@@ -515,13 +633,16 @@ export default function DataPage() {
     setPendingDateRangeFilters({})
     setPendingFilters({})
     setPendingMultiSelectFilters({})
+    pendingFiltersRef.current = {}
+    pendingMultiSelectFiltersRef.current = {}
+    pendingDateRangeFiltersRef.current = {}
     setOpenDateRangeColumn(null)
     setOpenDropdown(null)
     setShowFilters(false)
     setFilteredPage(1)
     setCurrentPage(1)
     setTotalFilteredCount(null)
-    
+
     // Fetch unfiltered data
     if (selectedTable) {
       fetchTableData(selectedTable, 1, false, false)
@@ -537,46 +658,18 @@ export default function DataPage() {
   }
 
   const toggleMultiSelectValue = (column: string, value: string) => {
-    setPendingMultiSelectFilters(prev => {
-      const current = prev[column] || []
-      const updated = current.includes(value)
-        ? current.filter(v => v !== value)
-        : [...current, value]
-      
-      return {
-        ...prev,
-        [column]: updated
-      }
-    })
+    const current = pendingMultiSelectFilters[column] || []
+    const updated = current.includes(value)
+      ? current.filter(v => v !== value)
+      : [...current, value]
+    const next = { ...pendingMultiSelectFilters, [column]: updated }
+    setPendingMultiSelectFilters(next)
+    pendingMultiSelectFiltersRef.current = next
   }
 
   const getSortedData = () => {
-    let data = [...tableData]
-
-    // Apply sorting
-    if (sortColumn) {
-      data.sort((a, b) => {
-        const aVal = a[sortColumn]
-        const bVal = b[sortColumn]
-        
-        // Handle null/undefined
-        if (aVal == null && bVal == null) return 0
-        if (aVal == null) return 1
-        if (bVal == null) return -1
-        
-        // Compare values
-        let comparison = 0
-        if (typeof aVal === 'number' && typeof bVal === 'number') {
-          comparison = aVal - bVal
-        } else {
-          comparison = String(aVal).localeCompare(String(bVal))
-        }
-        
-        return sortDirection === 'asc' ? comparison : -comparison
-      })
-    }
-
-    return data
+    // Data is already sorted server-side when sortColumn is set; otherwise fetched with default order (id asc)
+    return [...tableData]
   }
 
   const handleSignOut = async () => {
@@ -819,15 +912,15 @@ export default function DataPage() {
     return Number.isNaN(n) ? null : n
   }
 
-  // Recompute Balance and Reconciled amount Check from editable inputs. If any input is null, result is null.
-  // Balance = Net amount by ZUZU (from)/to channel - Amount Received /(Paid)
-  // Reconciled amount Check = Total Amount Submitted - Total Amount Received /(Paid)
+  // Recompute Balance and Reconciled amount Check from editable inputs.
+  // Balance = Net amount by ZUZU - Amount received (null amount_received treated as 0)
+  // Reconciled amount Check = Total amount submitted - Total amount received (both required)
   const computeFormulaColumns = (row: any): { balance: number | null; reconciled_amount_check: number | null } => {
     const netAmount = parseNum(row?.net_amount_by_zuzu)
-    const amountReceived = parseNum(row?.amount_received)
+    const amountReceived = parseNum(row?.amount_received) ?? 0
     const totalSubmitted = parseNum(row?.total_amount_submitted)
     const totalReceived = parseNum(row?.total_amount_received)
-    const balance = (netAmount != null && amountReceived != null) ? netAmount - amountReceived : null
+    const balance = netAmount != null ? netAmount - amountReceived : null
     const reconciled_amount_check = (totalSubmitted != null && totalReceived != null) ? totalSubmitted - totalReceived : null
     return { balance, reconciled_amount_check }
   }
@@ -837,8 +930,8 @@ export default function DataPage() {
 
   // Tooltip text shown when hovering over formula column header or cell
   const getFormulaColumnTooltip = (column: string): string | null => {
-    if (column === 'balance') return 'Net amount by ZUZU (from)/to channel − Amount Received /(Paid)'
-    if (column === 'reconciled_amount_check') return 'Total Amount Submitted − Total Amount Received /(Paid)'
+    if (column === 'balance') return 'Net amount by ZUZU - Amount received'
+    if (column === 'reconciled_amount_check') return 'Total amount submitted - Total amount received'
     return null
   }
 
@@ -951,6 +1044,12 @@ export default function DataPage() {
       if (channel.toLowerCase().includes('postpay') && processed.net_amount_by_zuzu != null) {
         const num = Number(processed.net_amount_by_zuzu)
         processed.net_amount_by_zuzu = -Math.abs(num)
+      }
+      // Balance = net_amount_by_zuzu - amount_received (treat null amount_received as 0)
+      if (processed.net_amount_by_zuzu != null) {
+        const netAmount = Number(processed.net_amount_by_zuzu)
+        const amountReceived = processed.amount_received != null ? Number(processed.amount_received) : 0
+        processed.balance = netAmount - amountReceived
       }
       return processed
     })
@@ -1283,50 +1382,30 @@ export default function DataPage() {
       const existingSet = new Set(existingNumbers)
       const duplicates = excelConfirmationNumbers.filter(num => existingSet.has(num))
       
-      if (duplicates.length > 0) {
-        const uniqueDuplicates = Array.from(new Set(duplicates))
-        const filteredOutCount = totalRows - validData.length
-        const alreadyPresentCount = duplicates.length
-        const toImportCount = validData.length - duplicates.length
-        setUploadPhase('idle')
-        setUploadProgressDetail('')
-        // Store duplicate info and show modal (include file so we can save it if user uploads non-duplicates)
-        setDuplicateInfo({
-          duplicates,
-          uniqueDuplicates,
-          validData,
-          totalRows,
-          filteredCount,
-          filteredOutCount,
-          filteredOutConfirmationExamples,
-          alreadyPresentCount,
-          toImportCount,
-          existingNumbers,
-          fileName,
-          sheetName,
-          file
-        })
-        setShowDuplicateModal(true)
-        setLoading(false)
-        return
-      }
-      if (uploadCancelledRef.current) {
-        setUploadPhase('idle')
-        setUploadProgressDetail('')
-        setLoading(false)
-        return
-      }
-      setUploadPhase('preparing')
-      setUploadProgressDetail('Preparing data...')
-      // Process data (currency lookup, Postpay net_amount_by_zuzu negation) then insert
-      const processedData = await processUploadData(validData)
-      if (uploadCancelledRef.current) {
-        setUploadPhase('idle')
-        setUploadProgressDetail('')
-        setLoading(false)
-        return
-      }
-      await insertBookings(processedData, totalRows, filteredCount, fileName, sheetName, file)
+      const uniqueDuplicates = Array.from(new Set(duplicates))
+      const filteredOutCount = totalRows - validData.length
+      const alreadyPresentCount = duplicates.length
+      const toImportCount = validData.length - duplicates.length
+      setUploadPhase('idle')
+      setUploadProgressDetail('')
+      // Always show confirmation modal before inserting (user can accept or refuse)
+      setDuplicateInfo({
+        duplicates,
+        uniqueDuplicates,
+        validData,
+        totalRows,
+        filteredCount,
+        filteredOutCount,
+        filteredOutConfirmationExamples,
+        alreadyPresentCount,
+        toImportCount,
+        existingNumbers,
+        fileName,
+        sheetName,
+        file
+      })
+      setShowDuplicateModal(true)
+      setLoading(false)
     } catch (error: any) {
       alert(`Error processing sheet: ${error.message}`)
     } finally {
@@ -1400,7 +1479,7 @@ export default function DataPage() {
   const handleUploadNonDuplicates = async () => {
     if (!duplicateInfo) return
     
-    const { validData, uniqueDuplicates, totalRows, filteredCount, fileName, sheetName } = duplicateInfo
+    const { validData, uniqueDuplicates, totalRows, filteredCount, fileName, sheetName, file, duplicates } = duplicateInfo
     
     // Filter out rows with duplicate confirmation numbers
     const nonDuplicateData = validData.filter((row: any) => 
@@ -1429,7 +1508,7 @@ export default function DataPage() {
       setUploadProgressDetail('')
       return
     }
-    await insertBookings(processedData, totalRows, filteredCount, fileName, sheetName, duplicateInfo.file, duplicateInfo.duplicates.length)
+    await insertBookings(processedData, totalRows, filteredCount, fileName, sheetName, file, duplicates.length)
   }
 
   useEffect(() => {
@@ -1443,6 +1522,24 @@ export default function DataPage() {
       <>
         {selectedTable === 'bookings' && (
           <>
+            <input
+              ref={excelFileInputRef}
+              type="file"
+              accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              onChange={handleExcelUpload}
+              className="hidden"
+              aria-hidden="true"
+            />
+            <button
+              type="button"
+              onClick={() => excelFileInputRef.current?.click()}
+              className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
+            >
+              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+              </svg>
+              Upload Excel
+            </button>
             <button
               type="button"
               onClick={downloadBookingsCsv}
@@ -1469,9 +1566,15 @@ export default function DataPage() {
             <button
               onClick={() => {
                 if (!showFilters) {
-                  setPendingFilters({...filters})
-                  setPendingMultiSelectFilters({...multiSelectFilters})
-                  setPendingDateRangeFilters({...dateRangeFilters})
+                  const nextText = { ...filters }
+                  const nextMulti = { ...multiSelectFilters }
+                  const nextDate = { ...dateRangeFilters }
+                  setPendingFilters(nextText)
+                  setPendingMultiSelectFilters(nextMulti)
+                  setPendingDateRangeFilters(nextDate)
+                  pendingFiltersRef.current = nextText
+                  pendingMultiSelectFiltersRef.current = nextMulti
+                  pendingDateRangeFiltersRef.current = nextDate
                 }
                 setShowFilters(!showFilters)
                 setOpenDropdown(null)
@@ -1588,7 +1691,9 @@ export default function DataPage() {
                           <th
                             key={col}
                             title={getFormulaColumnTooltip(col) ?? undefined}
-                            className={`px-2 py-2 text-left text-xs font-medium uppercase tracking-wide cursor-pointer hover:bg-gray-100 break-words ${
+                            className={`px-2 py-2 text-xs font-medium uppercase tracking-wide cursor-pointer hover:bg-gray-100 break-words ${
+                              isNumericColumnForDisplay(col) ? 'text-right' : 'text-left'
+                            } ${
                               isFormulaColumn(col) ? 'text-blue-700 bg-blue-50' : isColumnEditable(col) ? 'text-green-700 bg-green-50' : 'text-gray-500'
                             }`}
                             style={{
@@ -1601,6 +1706,11 @@ export default function DataPage() {
                                        '120px'
                             }}
                             onClick={(e) => {
+                              // Don't sort if user just blurred a filter input (click outside) — only apply filters on Apply button
+                              if (filterInputJustBlurredRef.current) {
+                                filterInputJustBlurredRef.current = false
+                                return
+                              }
                               // Don't sort if clicking the button
                               if (!(e.target as HTMLElement).closest('button')) {
                                 handleSort(col)
@@ -1674,10 +1784,11 @@ export default function DataPage() {
                                             <input
                                               type="date"
                                               value={range.from}
-                                              onChange={(e) => setPendingDateRangeFilters(prev => ({
-                                                ...prev,
-                                                [col]: { ...(prev[col] || { from: '', to: '' }), from: e.target.value }
-                                              }))}
+                                              onChange={(e) => {
+                                                const next = { ...pendingDateRangeFilters, [col]: { ...(pendingDateRangeFilters[col] || { from: '', to: '' }), from: e.target.value } }
+                                                setPendingDateRangeFilters(next)
+                                                pendingDateRangeFiltersRef.current = next
+                                              }}
                                               className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent"
                                             />
                                           </div>
@@ -1686,10 +1797,11 @@ export default function DataPage() {
                                             <input
                                               type="date"
                                               value={range.to}
-                                              onChange={(e) => setPendingDateRangeFilters(prev => ({
-                                                ...prev,
-                                                [col]: { ...(prev[col] || { from: '', to: '' }), to: e.target.value }
-                                              }))}
+                                              onChange={(e) => {
+                                                const next = { ...pendingDateRangeFilters, [col]: { ...(pendingDateRangeFilters[col] || { from: '', to: '' }), to: e.target.value } }
+                                                setPendingDateRangeFilters(next)
+                                                pendingDateRangeFiltersRef.current = next
+                                              }}
                                               className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent"
                                             />
                                           </div>
@@ -1697,7 +1809,9 @@ export default function DataPage() {
                                         <button
                                           type="button"
                                           onClick={() => {
-                                            setPendingDateRangeFilters(prev => ({ ...prev, [col]: { from: '', to: '' } }))
+                                            const next = { ...pendingDateRangeFilters, [col]: { from: '', to: '' } }
+                                            setPendingDateRangeFilters(next)
+                                            pendingDateRangeFiltersRef.current = next
                                           }}
                                           className="mt-2 w-full text-left px-2 py-1 text-xs text-orange-500 hover:bg-orange-50 rounded"
                                         >
@@ -1711,8 +1825,11 @@ export default function DataPage() {
                             }
 
                             if (isMultiSelect) {
-                              const uniqueValues = getUniqueValues(col)
                               const selectedValues = pendingMultiSelectFilters[col] || []
+                              const distinct = distinctColumnValues[col] || []
+                              const allOptions = (distinct.length > 0 || selectedValues.length > 0)
+                                ? [...new Set([...distinct, ...selectedValues])].sort()
+                                : getUniqueValues(col)
                               
                               return (
                                 <th key={col} className="px-2 py-2 relative" style={{
@@ -1744,14 +1861,16 @@ export default function DataPage() {
                                         <div className="p-2">
                                           <button
                                             onClick={() => {
-                                              setPendingMultiSelectFilters(prev => ({...prev, [col]: []}))
+                                              const next = { ...pendingMultiSelectFilters, [col]: [] }
+                                              setPendingMultiSelectFilters(next)
+                                              pendingMultiSelectFiltersRef.current = next
                                             }}
                                             className="w-full text-left px-2 py-1 text-xs text-orange-500 hover:bg-orange-50 rounded"
                                           >
                                             Clear selection
                                           </button>
                                         </div>
-                                        {uniqueValues.map(value => (
+                                        {allOptions.map(value => (
                                           <label
                                             key={value}
                                             className="flex items-center px-3 py-2 hover:bg-gray-100 cursor-pointer whitespace-nowrap"
@@ -1787,7 +1906,14 @@ export default function DataPage() {
                                   placeholder={`Filter ${formatColumnName(col)}...`}
                                   value={pendingFilters[col] || ''}
                                   onChange={(e) => handleFilterChange(col, e.target.value)}
-                                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent placeholder-gray-500"
+                                  onBlur={() => {
+                                    filterInputJustBlurredRef.current = true
+                                    setTimeout(() => { filterInputJustBlurredRef.current = false }, 100)
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') e.preventDefault()
+                                  }}
+                                  className={`w-full px-3 py-2 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent placeholder-gray-500 ${isNumericColumnForDisplay(col) ? 'text-right' : ''}`}
                                 />
                               </th>
                             )
@@ -1821,6 +1947,13 @@ export default function DataPage() {
                                   ? JSON.stringify(row[col])
                                   : displayValue(row[col])
                               
+                              // For formula columns, show computed value when stored value is null (e.g. new uploads or old rows)
+                              if (isFormula && (cellValue === '' || row[col] == null)) {
+                                const computed = computeFormulaColumns(row)
+                                if (col === 'balance' && computed.balance != null) cellValue = displayValue(computed.balance)
+                                else if (col === 'reconciled_amount_check' && computed.reconciled_amount_check != null) cellValue = displayValue(computed.reconciled_amount_check)
+                              }
+                              
                               // Format timestamps
                               if (isTimestamp && cellValue) {
                                 cellValue = formatTimestamp(cellValue)
@@ -1832,7 +1965,7 @@ export default function DataPage() {
                               return (
                                 <td 
                                   key={col} 
-                                  className={`px-2 py-2 ${isSelected ? 'bg-orange-200 ring-1 ring-orange-400' : ''} ${isFormula ? 'bg-blue-50/70' : isEditable ? 'bg-green-50 cursor-pointer hover:bg-green-100' : ''}`}
+                                  className={`px-2 py-2 ${isNumericColumnForDisplay(col) ? 'text-right' : ''} ${isSelected ? 'bg-orange-200 ring-1 ring-orange-400' : ''} ${isFormula ? 'bg-blue-50/70' : isEditable ? 'bg-green-50 cursor-pointer hover:bg-green-100' : ''}`}
                                   title={isEditable ? `Click to edit, Shift+click to select range. Ctrl+C copy, Ctrl+V paste.` : isFormula ? `${getFormulaColumnTooltip(col) ?? formatColumnName(col)} — Shift+click to select; Ctrl+C to copy.` : (cellValue ? `${cellValue} — ` : '') + 'Shift+click to select; Ctrl+C to copy.'}
                                   style={{
                                     minWidth: col === 'id' || col === 'upload_id' ? '60px' :
@@ -1868,12 +2001,12 @@ export default function DataPage() {
                                         }
                                       }}
                                       autoFocus
-                                      className="w-full px-2 py-1 text-xs border-2 border-blue-500 rounded focus:outline-none focus:border-blue-600"
+                                      className={`w-full px-2 py-1 text-xs border-2 border-blue-500 rounded focus:outline-none focus:border-blue-600 ${isNumericColumnForDisplay(col) ? 'text-right' : ''}`}
                                     />
                                   ) : (
                                     <div className={`text-xs leading-normal whitespace-nowrap overflow-hidden text-ellipsis ${
                                       isFormula ? 'text-blue-800 font-medium' : isEditable ? 'text-green-800 font-medium' : 'text-gray-900'
-                                    }`}>
+                                    } ${isNumericColumnForDisplay(col) ? 'text-right' : ''}`}>
                                       {cellValue || (isEditable ? <span className="text-gray-400 italic">Click to edit</span> : '')}
                                     </div>
                                   )}
@@ -2290,22 +2423,25 @@ export default function DataPage() {
         </div>
       )}
 
-      {/* Duplicate Records Modal */}
+      {/* Upload confirmation modal — always shown before adding any rows to the database */}
       {showDuplicateModal && duplicateInfo && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full">
-            <div className="bg-red-50 border-b border-red-200 px-6 py-4 flex justify-between items-center rounded-t-lg">
+            <div className="bg-orange-50 border-b border-orange-200 px-6 py-4 flex justify-between items-center rounded-t-lg">
               <div className="flex items-center">
-                <svg className="w-6 h-6 text-red-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                <svg className="w-6 h-6 text-orange-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                <h2 className="text-xl font-semibold text-red-900">
-                  Upload details to review
+                <h2 className="text-xl font-semibold text-orange-900">
+                  Confirm upload — no data has been added yet
                 </h2>
               </div>
             </div>
             
             <div className="px-6 py-4">
+              <p className="text-sm text-gray-600 mb-4">
+                Review the summary below. Choose <strong>Accept</strong> to add these bookings to the database, or <strong>Refuse</strong> to cancel.
+              </p>
               <div className="mb-4">
                 <div className="bg-gray-50 rounded-lg p-4 mb-3 space-y-3 text-sm">
                   <div>
@@ -2320,19 +2456,17 @@ export default function DataPage() {
                     )}
                   </div>
                   <div>
-                    <span className="text-gray-600">Number of bookings already present in the table: </span>
-                    <span className="font-semibold text-gray-900">{(duplicateInfo.alreadyPresentCount ?? duplicateInfo.duplicates.length).toLocaleString()}</span>
-                    <span className="text-gray-500 ml-1">(e.g. {(duplicateInfo.uniqueDuplicates as (string | number)[]).slice(0, 4).join(', ')})</span>
+                    <span className="text-gray-600">Number of bookings already present in the table (duplicates): </span>
+                    <span className="font-semibold text-gray-900">{(duplicateInfo.alreadyPresentCount ?? duplicateInfo.duplicates?.length ?? 0).toLocaleString()}</span>
+                    {(duplicateInfo.uniqueDuplicates as (string | number)[] | undefined)?.length > 0 && (
+                      <span className="text-gray-500 ml-1">(e.g. {(duplicateInfo.uniqueDuplicates as (string | number)[]).slice(0, 4).join(', ')})</span>
+                    )}
                   </div>
                   <div>
-                    <span className="text-gray-600">Number of bookings to import: </span>
-                    <span className="font-semibold text-green-600">{(duplicateInfo.toImportCount ?? duplicateInfo.validData.length - duplicateInfo.duplicates.length).toLocaleString()}</span>
+                    <span className="text-gray-600">Number of bookings that will be added to the database: </span>
+                    <span className="font-semibold text-green-600">{(duplicateInfo.toImportCount ?? (duplicateInfo.validData.length - (duplicateInfo.duplicates?.length ?? 0))).toLocaleString()}</span>
                   </div>
                 </div>
-
-                <p className="text-gray-700 font-medium mb-2">
-                  What would you like to do?
-                </p>
               </div>
             </div>
 
@@ -2341,13 +2475,13 @@ export default function DataPage() {
                 onClick={handleCancelUpload}
                 className="flex-1 px-4 py-3 border-2 border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 font-semibold transition duration-200"
               >
-                ❌ Cancel Upload Entirely
+                Refuse — do not add
               </button>
               <button
                 onClick={handleUploadNonDuplicates}
                 className="flex-1 px-4 py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-semibold transition duration-200"
               >
-                ✅ Upload Only New Records ({(duplicateInfo.toImportCount ?? duplicateInfo.validData.length - duplicateInfo.duplicates.length).toLocaleString()})
+                Accept — add {(duplicateInfo.toImportCount ?? duplicateInfo.validData.length - (duplicateInfo.duplicates?.length ?? 0)).toLocaleString()} bookings
               </button>
             </div>
           </div>

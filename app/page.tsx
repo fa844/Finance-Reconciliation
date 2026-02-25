@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 
 export default function Home() {
   const [session, setSession] = useState<any>(null)
@@ -49,18 +50,18 @@ export default function Home() {
             </h1>
           </div>
           <div className="space-y-4">
-            <button
-              onClick={() => router.push('/login')}
-              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 px-4 rounded-lg transition duration-200"
+            <Link
+              href="/login"
+              className="w-full block text-center bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 px-4 rounded-lg transition duration-200"
             >
               Sign In
-            </button>
-            <button
-              onClick={() => router.push('/signup')}
-              className="w-full bg-white hover:bg-orange-50 text-orange-500 font-semibold py-3 px-4 rounded-lg border-2 border-orange-500 transition duration-200"
+            </Link>
+            <Link
+              href="/signup"
+              className="w-full block text-center bg-white hover:bg-orange-50 text-orange-500 font-semibold py-3 px-4 rounded-lg border-2 border-orange-500 transition duration-200"
             >
               Create Account
-            </button>
+            </Link>
           </div>
         </div>
       </div>
