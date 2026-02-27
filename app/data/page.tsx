@@ -1,16 +1,18 @@
 'use client'
 
-import { useEffect, useState, useRef } from 'react'
+import { Suspense, useEffect, useState, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { supabase } from '@/lib/supabase'
 import { useRouter, useSearchParams } from 'next/navigation'
 import * as XLSX from 'xlsx'
 import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
+import { getSavedFilterPrefs, saveFilterPrefs, type DataPageFilterPrefs } from '@/lib/filterPrefs'
 
 interface Table {
   table_name: string
 }
 
-export default function DataPage() {
+function DataPageContent() {
   const [session, setSession] = useState<any>(null)
   const [tables, setTables] = useState<Table[]>([])
   const [selectedTable, setSelectedTable] = useState<string | null>(null)
@@ -44,12 +46,17 @@ export default function DataPage() {
   const [dateRangeFilters, setDateRangeFilters] = useState<{[key: string]: { from: string; to: string }}>({})
   const [pendingDateRangeFilters, setPendingDateRangeFilters] = useState<{[key: string]: { from: string; to: string }}>({})
   const [openDateRangeColumn, setOpenDateRangeColumn] = useState<string | null>(null)
+  /** Anchor rect for filter popups so we can render in portal (avoids clipping by table overflow) */
+  const [filterPopupAnchor, setFilterPopupAnchor] = useState<{ top: number; left: number; bottom: number; width: number } | null>(null)
   const [filteredPage, setFilteredPage] = useState(1)
   const [filteredPageSize] = useState(100)
   const [totalFilteredCount, setTotalFilteredCount] = useState<number | null>(null)
   const [savedScrollPosition, setSavedScrollPosition] = useState<number | null>(null)
   // Unfiltered distinct values per multi-select column (so dropdown always shows all options)
   const [distinctColumnValues, setDistinctColumnValues] = useState<Record<string, string[]>>({})
+  // For balance_before_reference_dates and balance_before_reference_date_in_sgd formulas
+  const [referenceDate, setReferenceDate] = useState<string | null>(null)
+  const [ratesToSgd, setRatesToSgd] = useState<Record<string, number>>({})
   const [editingCell, setEditingCell] = useState<{rowIndex: number, column: string} | null>(null)
   const [editingValue, setEditingValue] = useState<string>('')
   const [anchorCell, setAnchorCell] = useState<{ rowIndex: number; column: string } | null>(null)
@@ -90,9 +97,19 @@ export default function DataPage() {
       col === 'number_of_room_nights' ||
       col.includes('amount') ||
       col === 'balance' ||
+      col === 'balance_before_reference_dates' ||
+      col === 'balance_before_reference_date_in_sgd' ||
       col === 'reconciled_amount_check' ||
       col === 'transmission_queue_id' ||
       col === 'reference_number')
+
+  // Columns that hold currency/money: show with exactly 2 decimal places (display only; storage keeps full precision)
+  const isCurrencyColumn = (col: string): boolean =>
+    col.includes('amount') ||
+    col === 'balance' ||
+    col === 'balance_before_reference_dates' ||
+    col === 'balance_before_reference_date_in_sgd' ||
+    col === 'reconciled_amount_check'
 
   // Format timestamp from ISO 8601 to simple format (YYYY-MM-DD HH:MM:SS)
   const formatTimestamp = (timestamp: string | null): string => {
@@ -115,6 +132,14 @@ export default function DataPage() {
   const displayValue = (v: any): string => {
     if (v == null || v === '' || v === 'null' || v === 'undefined') return ''
     return String(v)
+  }
+
+  // Format currency for display only: 2 decimal places + comma every 3 digits (e.g. 987873 → "987,873.00", 80.2697 → "80.27"); storage unchanged
+  const formatCurrencyForDisplay = (v: any): string => {
+    if (v == null || v === '' || v === 'null' || v === 'undefined') return ''
+    const n = Number(v)
+    if (!Number.isFinite(n)) return String(v)
+    return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   }
 
   /** Normalize date from Excel (DD/MM/YYYY, serial number, etc.) to ISO YYYY-MM-DD for the database */
@@ -153,6 +178,8 @@ export default function DataPage() {
       'total_amount_received': 'Total Amount Received',
       'payment_date': 'Payment Date',
       'balance': 'Balance',
+      'balance_before_reference_dates': 'Balance before reference date',
+      'balance_before_reference_date_in_sgd': 'Balance before reference date in SGD',
       'reconciled_amount_check': 'Reconciled amount Check',
       'transmission_queue_id': 'Transmission Queue ID',
       'reference_number': 'Reference Number',
@@ -169,10 +196,33 @@ export default function DataPage() {
       } else {
         setSession(session)
         fetchTables()
-        // Automatically select bookings table
+        // Automatically select bookings table; restore saved filters/sort if any
         if (!selectedTable) {
           setSelectedTable('bookings')
-          fetchTableData('bookings', 1)
+          const prefs = getSavedFilterPrefs<DataPageFilterPrefs>(session.user.id, 'data')
+          if (prefs && (Object.keys(prefs.filters ?? {}).some(k => (prefs.filters![k] ?? '').trim()) || Object.keys(prefs.multiSelectFilters ?? {}).some(k => (prefs.multiSelectFilters![k] ?? []).length > 0) || Object.keys(prefs.dateRangeFilters ?? {}).some(k => { const r = (prefs.dateRangeFilters ?? {})[k]; return (r?.from ?? '').trim() || (r?.to ?? '').trim() }) || (prefs.sortColumn ?? '')) ) {
+            const textFilters = prefs.filters ?? {}
+            const multiFilters = prefs.multiSelectFilters ?? {}
+            const dateFilters = prefs.dateRangeFilters ?? {}
+            const sortCol = prefs.sortColumn ?? null
+            const sortDir = prefs.sortDirection === 'desc' ? 'desc' : 'asc'
+            setFilters(textFilters)
+            setMultiSelectFilters(multiFilters)
+            setDateRangeFilters(dateFilters)
+            setPendingFilters(textFilters)
+            setPendingMultiSelectFilters(multiFilters)
+            setPendingDateRangeFilters(dateFilters)
+            setSortColumn(sortCol)
+            setSortDirection(sortDir)
+            lastSortRef.current = { column: sortCol, direction: sortDir }
+            pendingFiltersRef.current = textFilters
+            pendingMultiSelectFiltersRef.current = multiFilters
+            pendingDateRangeFiltersRef.current = dateFilters
+            const hasActive = Object.keys(textFilters).some(k => (textFilters[k] ?? '').trim()) || Object.keys(multiFilters).some(k => (multiFilters[k] ?? []).length > 0) || Object.keys(dateFilters).some(k => { const r = dateFilters[k]; return (r?.from ?? '').trim() || (r?.to ?? '').trim() })
+            fetchTableData('bookings', 1, false, hasActive, { textFilters, multiFilters, dateRangeFilters: dateFilters }, sortCol, sortDir)
+          } else {
+            fetchTableData('bookings', 1)
+          }
         }
       }
     })
@@ -190,10 +240,11 @@ export default function DataPage() {
     return () => subscription.unsubscribe()
   }, [router])
 
-  // Close dropdown and date range popup when clicking outside
+  // Close dropdown and date range popup when clicking outside (portaled popups use .filter-popup-portal so we don't close when clicking inside them)
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Element
+      if (target.closest('.filter-popup-portal')) return
       if (openDropdown && !target.closest('.relative')) {
         setOpenDropdown(null)
         filterInputJustBlurredRef.current = true
@@ -209,6 +260,18 @@ export default function DataPage() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [openDropdown, openDateRangeColumn])
+
+  // Close filter popups when user scrolls the table
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const close = () => {
+      setOpenDateRangeColumn(null)
+      setOpenDropdown(null)
+    }
+    el.addEventListener('scroll', close, { passive: true })
+    return () => el.removeEventListener('scroll', close)
+  }, [])
 
   // Restore horizontal scroll after filtering or sorting
   useEffect(() => {
@@ -406,6 +469,8 @@ export default function DataPage() {
           'total_amount_received',
           'payment_date',
           'balance',
+          'balance_before_reference_dates',
+          'balance_before_reference_date_in_sgd',
           'reconciled_amount_check',
           'transmission_queue_id',
           'reference_number',
@@ -458,7 +523,7 @@ export default function DataPage() {
             .limit(limit)
           if (error) continue
           const values = (data ?? [])
-            .map(row => String((row as Record<string, unknown>)[col] ?? '').trim())
+            .map(row => String(((row as unknown) as Record<string, unknown>)[col] ?? '').trim())
             .filter(Boolean)
           result[col] = Array.from(new Set(values)).sort()
         }
@@ -471,6 +536,37 @@ export default function DataPage() {
 
   useEffect(() => {
     if (selectedTable) fetchDistinctColumnValues(selectedTable)
+  }, [selectedTable])
+
+  // Fetch reference date and currency rates for balance_before_reference_dates / balance_before_reference_date_in_sgd
+  useEffect(() => {
+    if (selectedTable !== 'bookings') return
+    const loadRefAndRates = async () => {
+      const [refRes, currencyRes] = await Promise.all([
+        supabase.from('app_settings').select('reference_date').eq('id', 1).maybeSingle(),
+        supabase.from('currency').select('currency_code, rate_to_sgd')
+      ])
+      if (refRes.data?.reference_date) {
+        const d = refRes.data.reference_date
+        setReferenceDate(typeof d === 'string' ? d.slice(0, 10) : (d && 'toISOString' in d ? (d as Date).toISOString().slice(0, 10) : null))
+      } else {
+        setReferenceDate(null)
+      }
+      const rates: Record<string, number> = { SGD: 1 }
+      if (currencyRes.data) {
+        for (const row of currencyRes.data) {
+          const code = (row.currency_code ?? '').trim().toUpperCase()
+          if (!code) continue
+          if (code === 'SGD') rates[code] = 1
+          else {
+            const r = row.rate_to_sgd
+            if (r != null && Number.isFinite(Number(r))) rates[code] = Number(r)
+          }
+        }
+      }
+      setRatesToSgd(rates)
+    }
+    loadRefAndRates()
   }, [selectedTable])
 
   const csvEscape = (v: any): string => {
@@ -585,6 +681,16 @@ export default function DataPage() {
     if (selectedTable) {
       setCurrentPage(1)
       fetchTableData(selectedTable, 1, false, hasActiveFilters, undefined, column, newDirection)
+      // Persist sort (and current filters) so they are restored next visit
+      if (session?.user?.id) {
+        saveFilterPrefs(session.user.id, 'data', {
+          filters,
+          multiSelectFilters,
+          dateRangeFilters,
+          sortColumn: column,
+          sortDirection: newDirection,
+        })
+      }
     }
   }
 
@@ -623,6 +729,16 @@ export default function DataPage() {
         hasActiveFilters,
         { textFilters, multiFilters, dateRangeFilters: dateFilters }
       )
+      // Persist so filters (and current sort) are restored next visit
+      if (session?.user?.id) {
+        saveFilterPrefs(session.user.id, 'data', {
+          filters: textFilters,
+          multiSelectFilters: multiFilters,
+          dateRangeFilters: dateFilters,
+          sortColumn: sortColumn ?? null,
+          sortDirection: sortDirection,
+        })
+      }
     }
   }
 
@@ -646,6 +762,16 @@ export default function DataPage() {
     // Fetch unfiltered data
     if (selectedTable) {
       fetchTableData(selectedTable, 1, false, false)
+    }
+    // Persist empty filters so next visit shows no filters
+    if (session?.user?.id) {
+      saveFilterPrefs(session.user.id, 'data', {
+        filters: {},
+        multiSelectFilters: {},
+        dateRangeFilters: {},
+        sortColumn: sortColumn ?? null,
+        sortDirection: sortDirection,
+      })
     }
   }
 
@@ -720,8 +846,15 @@ export default function DataPage() {
   const saveEdit = async () => {
     if (!selectedTable || !editingRow) return
 
-    const { balance, reconciled_amount_check } = computeFormulaColumns(editFormData)
-    const updatedData = { ...editFormData, balance, reconciled_amount_check, updated_at: new Date().toISOString() }
+    const computed = computeFormulaColumns(editFormData, referenceDate, ratesToSgd)
+    const updatedData = {
+      ...editFormData,
+      balance: computed.balance,
+      reconciled_amount_check: computed.reconciled_amount_check,
+      balance_before_reference_dates: computed.balance_before_reference_dates,
+      balance_before_reference_date_in_sgd: computed.balance_before_reference_date_in_sgd,
+      updated_at: new Date().toISOString()
+    }
 
     const { error } = await supabase
       .from(selectedTable)
@@ -766,14 +899,26 @@ export default function DataPage() {
   const saveCellEdit = async (row: any, column: string, newValue: string) => {
     if (!selectedTable) return
 
-    const updatedRow = { ...row, [column]: newValue || null }
-    const { balance, reconciled_amount_check } = computeFormulaColumns(updatedRow)
+    // For date columns, normalize so we never send invalid values (e.g. "80.26") to the database
+    const valueToSave =
+      isDateColumn(column) && column !== 'created_at' && column !== 'updated_at'
+        ? (normalizeDateForDb(newValue) ?? null)
+        : (newValue?.trim() || null)
+
+    const updatedRow = { ...row, [column]: valueToSave }
+    const computed = computeFormulaColumns(updatedRow, referenceDate, ratesToSgd)
+
+    // Build payload: safe types for Postgres (no NaN/undefined). Send only core columns so update succeeds even if optional migrations (balance_before_reference_*) weren't run.
+    const safeNum = (n: number | null | undefined): number | null =>
+      n != null && Number.isFinite(n) ? Math.round(n * 100) / 100 : null
     const updateData: Record<string, unknown> = {
-      [column]: newValue || null,
-      balance,
-      reconciled_amount_check,
+      [column]: valueToSave,
       updated_at: new Date().toISOString()
     }
+    const bal = safeNum(computed.balance)
+    if (bal !== null) updateData.balance = bal
+    const recon = safeNum(computed.reconciled_amount_check)
+    if (recon !== null) updateData.reconciled_amount_check = recon
 
     const { error } = await supabase
       .from(selectedTable)
@@ -781,15 +926,28 @@ export default function DataPage() {
       .eq('id', row.id)
 
     if (error) {
-      alert(`Error updating cell: ${error.message}`)
+      const err = error as { message?: string; details?: string; hint?: string }
+      const msg = [err.message, err.details, err.hint].filter(Boolean).join(' — ')
+      console.error('Cell update failed. Payload:', updateData, 'Error:', error)
+      alert(`Error updating cell: ${msg || 'Unknown error'}`)
     } else {
       // Log to edit history only for editable (green) columns
       if (isColumnEditable(column)) {
-        await logEditToHistory(selectedTable, row.id, column, row[column], newValue || null, row)
+        await logEditToHistory(selectedTable, row.id, column, row[column], valueToSave, row)
       }
       // Update local data with edited cell, recomputed formula columns, and new updated_at
       setTableData(prevData =>
-        prevData.map(r => r.id === row.id ? { ...r, [column]: newValue || null, balance, reconciled_amount_check, updated_at: updateData.updated_at } : r)
+        prevData.map(r => r.id === row.id
+          ? {
+              ...r,
+              [column]: valueToSave,
+              balance: computed.balance,
+              reconciled_amount_check: computed.reconciled_amount_check,
+              balance_before_reference_dates: computed.balance_before_reference_dates,
+              balance_before_reference_date_in_sgd: computed.balance_before_reference_date_in_sgd,
+              updated_at: updateData.updated_at
+            }
+          : r)
       )
     }
 
@@ -800,7 +958,13 @@ export default function DataPage() {
   const startCellEdit = (rowIndex: number, column: string, currentValue: any) => {
     setEditingCell({ rowIndex, column })
     const raw = String(currentValue ?? '')
-    setEditingValue(raw === 'null' || raw === 'undefined' ? '' : raw)
+    let initial = raw === 'null' || raw === 'undefined' ? '' : raw
+    // For date columns, normalize to YYYY-MM-DD so the date input displays and submits correctly
+    if (isDateColumn(column) && column !== 'created_at' && column !== 'updated_at' && initial) {
+      const normalized = normalizeDateForDb(initial)
+      initial = normalized ?? ''
+    }
+    setEditingValue(initial)
   }
 
   const cancelCellEdit = () => {
@@ -816,10 +980,13 @@ export default function DataPage() {
       const start = Math.min(anchorCell.rowIndex, rowIndex)
       const end = Math.max(anchorCell.rowIndex, rowIndex)
       setCellSelection({ column, startRowIndex: start, endRowIndex: end })
+      scrollContainerRef.current?.focus()
       return
     }
     setAnchorCell({ rowIndex, column })
     setCellSelection({ column, startRowIndex: rowIndex, endRowIndex: rowIndex })
+    // So Ctrl+C / Ctrl+V work: give the table keyboard focus when user clicks a cell
+    scrollContainerRef.current?.focus()
   }
 
   const handleCellDoubleClick = (rowIndex: number, column: string, currentValue: any, isEditable: boolean, isFormula: boolean, isBeingEdited: boolean) => {
@@ -871,20 +1038,33 @@ export default function DataPage() {
     } catch {
       return
     }
-    const lines = text.split(/\r?\n/).map(s => s.trim())
+    const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
     const sourceSize = lines.length
-    if (cellSelection) {
-      const targetSize = cellSelection.endRowIndex - cellSelection.startRowIndex + 1
-      if (targetSize !== sourceSize) {
-        alert(`The range is not the right size. It should be ${sourceSize} cell(s).`)
-        return
-      }
+    if (sourceSize === 0) return
+
+    const hasRange = !!cellSelection
+    const targetSize = hasRange ? cellSelection!.endRowIndex - cellSelection!.startRowIndex + 1 : 1
+    // Strict size check only when copying multiple cells into a range of multiple cells: destination must match source size (single-cell paste = paste downward, no error)
+    if (sourceSize > 1 && hasRange && targetSize > 1 && targetSize !== sourceSize) {
+      alert(`The range is not the right size. It should be ${sourceSize} cell(s).`)
+      return
     }
+
+    let valuesToWrite: string[]
+    let destCount: number
+    if (sourceSize === 1) {
+      destCount = hasRange ? targetSize : 1
+      valuesToWrite = Array(destCount).fill(lines[0])
+    } else {
+      valuesToWrite = lines
+      destCount = sourceSize
+    }
+
     const sorted = getSortedData()
-    for (let i = 0; i < lines.length; i++) {
+    for (let i = 0; i < destCount; i++) {
       const row = sorted[targetStartRow + i]
       if (!row) break
-      await saveCellEdit(row, targetColumn, lines[i])
+      await saveCellEdit(row, targetColumn, valuesToWrite[i])
     }
     setCellSelection(null)
     setAnchorCell(null)
@@ -912,25 +1092,66 @@ export default function DataPage() {
     return Number.isNaN(n) ? null : n
   }
 
-  // Recompute Balance and Reconciled amount Check from editable inputs.
+  // Recompute Balance, Reconciled amount Check, and balance-before-reference-date columns.
   // Balance = Net amount by ZUZU - Amount received (null amount_received treated as 0)
-  // Reconciled amount Check = Total amount submitted - Total amount received (both required)
-  const computeFormulaColumns = (row: any): { balance: number | null; reconciled_amount_check: number | null } => {
+  // Balance before reference date = net - amount_received only when payment_date is not null and payment_date <= reference_date
+  // Balance before reference date in SGD = balance_before_reference_dates / rate_to_sgd (SGD = 1)
+  const computeFormulaColumns = (
+    row: any,
+    refDate?: string | null,
+    rates?: Record<string, number>
+  ): {
+    balance: number | null
+    reconciled_amount_check: number | null
+    balance_before_reference_dates: number | null
+    balance_before_reference_date_in_sgd: number | null
+  } => {
     const netAmount = parseNum(row?.net_amount_by_zuzu)
     const amountReceived = parseNum(row?.amount_received) ?? 0
     const totalSubmitted = parseNum(row?.total_amount_submitted)
     const totalReceived = parseNum(row?.total_amount_received)
     const balance = netAmount != null ? netAmount - amountReceived : null
     const reconciled_amount_check = (totalSubmitted != null && totalReceived != null) ? totalSubmitted - totalReceived : null
-    return { balance, reconciled_amount_check }
+
+    let balance_before_reference_dates: number | null = null
+    let balance_before_reference_date_in_sgd: number | null = null
+    if (netAmount != null && refDate) {
+      const paymentDateRaw = row?.payment_date
+      const paymentDateStr =
+        paymentDateRaw == null || paymentDateRaw === ''
+          ? null
+          : typeof paymentDateRaw === 'string'
+            ? paymentDateRaw.slice(0, 10)
+            : (paymentDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
+      const subtractAmount =
+        paymentDateStr != null && paymentDateStr <= refDate ? (parseNum(row?.amount_received) ?? 0) : 0
+      balance_before_reference_dates = netAmount - subtractAmount
+
+      if (rates) {
+        const currencyCode = (row?.currency ?? '').toString().trim().toUpperCase() || 'SGD'
+        const rate = currencyCode === 'SGD' ? 1 : (rates[currencyCode] ?? null)
+        if (rate != null && rate !== 0) {
+          balance_before_reference_date_in_sgd = balance_before_reference_dates / rate
+        }
+      }
+    }
+
+    return {
+      balance,
+      reconciled_amount_check,
+      balance_before_reference_dates,
+      balance_before_reference_date_in_sgd
+    }
   }
 
   // Formula-derived columns; read-only, shown in distinct color (currency is read-only but styled grey like country)
-  const isFormulaColumn = (column: string): boolean => column === 'balance' || column === 'reconciled_amount_check'
+  const isFormulaColumn = (column: string): boolean => column === 'balance' || column === 'balance_before_reference_dates' || column === 'balance_before_reference_date_in_sgd' || column === 'reconciled_amount_check'
 
   // Tooltip text shown when hovering over formula column header or cell
   const getFormulaColumnTooltip = (column: string): string | null => {
     if (column === 'balance') return 'Net amount by ZUZU - Amount received'
+    if (column === 'balance_before_reference_dates') return 'Balance, ignoring any payments done after the reference date.'
+    if (column === 'balance_before_reference_date_in_sgd') return 'Balance (before reference date) converted to SGD'
     if (column === 'reconciled_amount_check') return 'Total amount submitted - Total amount received'
     return null
   }
@@ -1015,23 +1236,38 @@ export default function DataPage() {
     }
   }
 
-  // Data processing before insert: fill currency from currency table, negate net_amount_by_zuzu for Postpay channel
+  // Data processing before insert: fill currency, negate net_amount_by_zuzu for Postpay, compute formula columns
   const processUploadData = async (data: any[]): Promise<any[]> => {
-    const { data: currencyRows, error: currencyError } = await supabase
-      .from('currency')
-      .select('country, currency_code')
+    const [currencyRes, appSettingsRes] = await Promise.all([
+      supabase.from('currency').select('country, currency_code, rate_to_sgd'),
+      supabase.from('app_settings').select('reference_date').eq('id', 1).maybeSingle()
+    ])
 
-    if (currencyError) {
-      console.warn('Currency lookup failed, leaving currency empty:', currencyError.message)
+    if (currencyRes.error) {
+      console.warn('Currency lookup failed, leaving currency empty:', currencyRes.error.message)
     }
 
     const currencyByCountry = new Map<string, string>()
-    if (currencyRows) {
-      for (const row of currencyRows) {
+    const ratesToSgdMap: Record<string, number> = {}
+    if (currencyRes.data) {
+      for (const row of currencyRes.data) {
         const key = (row.country ?? '').trim().toLowerCase()
         if (key) currencyByCountry.set(key, row.currency_code ?? '')
+        const code = (row.currency_code ?? '').trim().toUpperCase()
+        if (code) {
+          if (code === 'SGD') ratesToSgdMap[code] = 1
+          else if (row.rate_to_sgd != null && Number.isFinite(Number(row.rate_to_sgd))) ratesToSgdMap[code] = Number(row.rate_to_sgd)
+        }
       }
     }
+
+    const refDateRaw = appSettingsRes.data?.reference_date
+    const refDate =
+      refDateRaw == null
+        ? null
+        : typeof refDateRaw === 'string'
+          ? refDateRaw.slice(0, 10)
+          : (refDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
 
     return data.map((row: any) => {
       const processed = { ...row }
@@ -1051,6 +1287,10 @@ export default function DataPage() {
         const amountReceived = processed.amount_received != null ? Number(processed.amount_received) : 0
         processed.balance = netAmount - amountReceived
       }
+      // Balance before reference date and in SGD (same logic as computeFormulaColumns)
+      const computed = computeFormulaColumns(processed, refDate, ratesToSgdMap)
+      if (computed.balance_before_reference_dates != null) processed.balance_before_reference_dates = computed.balance_before_reference_dates
+      if (computed.balance_before_reference_date_in_sgd != null) processed.balance_before_reference_date_in_sgd = computed.balance_before_reference_date_in_sgd
       return processed
     })
   }
@@ -1761,7 +2001,11 @@ export default function DataPage() {
                                   <div className="relative">
                                     <button
                                       type="button"
-                                      onClick={() => setOpenDateRangeColumn(openDateRangeColumn === col ? null : col)}
+                                      onClick={(e) => {
+                                        const rect = e.currentTarget.getBoundingClientRect()
+                                        setFilterPopupAnchor({ top: rect.top, left: rect.left, bottom: rect.bottom, width: rect.width })
+                                        setOpenDateRangeColumn(openDateRangeColumn === col ? null : col)
+                                      }}
                                       className={`w-full px-3 py-2 text-sm text-left border rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent flex justify-between items-center ${
                                         hasRange ? 'border-orange-400 bg-orange-50 text-orange-900' : 'border-gray-300 bg-white hover:bg-gray-50 text-gray-500'
                                       }`}
@@ -1769,56 +2013,12 @@ export default function DataPage() {
                                       <span className="truncate">
                                         {hasRange
                                           ? `${range.from || '…'} → ${range.to || '…'}`
-                                          : `Date range: ${formatColumnName(col)}...`}
+                                          : 'Filter'}
                                       </span>
                                       <svg className="w-4 h-4 ml-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                                       </svg>
                                     </button>
-                                    {openDateRangeColumn === col && (
-                                      <div className="absolute z-50 mt-1 left-0 min-w-[240px] bg-white border border-gray-300 rounded-lg shadow-lg p-3">
-                                        <div className="text-xs font-semibold text-gray-700 mb-2">{formatColumnName(col)}</div>
-                                        <div className="space-y-2">
-                                          <div>
-                                            <label className="block text-xs text-gray-500 mb-0.5">From</label>
-                                            <input
-                                              type="date"
-                                              value={range.from}
-                                              onChange={(e) => {
-                                                const next = { ...pendingDateRangeFilters, [col]: { ...(pendingDateRangeFilters[col] || { from: '', to: '' }), from: e.target.value } }
-                                                setPendingDateRangeFilters(next)
-                                                pendingDateRangeFiltersRef.current = next
-                                              }}
-                                              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                                            />
-                                          </div>
-                                          <div>
-                                            <label className="block text-xs text-gray-500 mb-0.5">To</label>
-                                            <input
-                                              type="date"
-                                              value={range.to}
-                                              onChange={(e) => {
-                                                const next = { ...pendingDateRangeFilters, [col]: { ...(pendingDateRangeFilters[col] || { from: '', to: '' }), to: e.target.value } }
-                                                setPendingDateRangeFilters(next)
-                                                pendingDateRangeFiltersRef.current = next
-                                              }}
-                                              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                                            />
-                                          </div>
-                                        </div>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            const next = { ...pendingDateRangeFilters, [col]: { from: '', to: '' } }
-                                            setPendingDateRangeFilters(next)
-                                            pendingDateRangeFiltersRef.current = next
-                                          }}
-                                          className="mt-2 w-full text-left px-2 py-1 text-xs text-orange-500 hover:bg-orange-50 rounded"
-                                        >
-                                          Clear range
-                                        </button>
-                                      </div>
-                                    )}
                                   </div>
                                 </th>
                               )
@@ -1826,10 +2026,6 @@ export default function DataPage() {
 
                             if (isMultiSelect) {
                               const selectedValues = pendingMultiSelectFilters[col] || []
-                              const distinct = distinctColumnValues[col] || []
-                              const allOptions = (distinct.length > 0 || selectedValues.length > 0)
-                                ? [...new Set([...distinct, ...selectedValues])].sort()
-                                : getUniqueValues(col)
                               
                               return (
                                 <th key={col} className="px-2 py-2 relative" style={{
@@ -1843,49 +2039,22 @@ export default function DataPage() {
                                 }}>
                                   <div className="relative">
                                     <button
-                                      onClick={() => setOpenDropdown(openDropdown === col ? null : col)}
+                                      onClick={(e) => {
+                                        const rect = e.currentTarget.getBoundingClientRect()
+                                        setFilterPopupAnchor({ top: rect.top, left: rect.left, bottom: rect.bottom, width: rect.width })
+                                        setOpenDropdown(openDropdown === col ? null : col)
+                                      }}
                                       className={`w-full px-3 py-2 text-sm text-left border border-gray-300 rounded bg-white hover:bg-gray-50 focus:ring-2 focus:ring-orange-500 focus:border-transparent flex justify-between items-center ${selectedValues.length === 0 ? 'text-gray-500' : ''}`}
                                     >
                                       <span className="truncate">
                                         {selectedValues.length > 0 
                                           ? `${selectedValues.length} selected` 
-                                          : `Select ${formatColumnName(col)}...`}
+                                          : 'Filter'}
                                       </span>
                                       <svg className="w-4 h-4 ml-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                                       </svg>
                                     </button>
-                                    
-                                    {openDropdown === col && (
-                                      <div className="absolute z-50 mt-1 min-w-max w-full bg-white border border-gray-300 rounded shadow-lg max-h-60 overflow-y-auto">
-                                        <div className="p-2">
-                                          <button
-                                            onClick={() => {
-                                              const next = { ...pendingMultiSelectFilters, [col]: [] }
-                                              setPendingMultiSelectFilters(next)
-                                              pendingMultiSelectFiltersRef.current = next
-                                            }}
-                                            className="w-full text-left px-2 py-1 text-xs text-orange-500 hover:bg-orange-50 rounded"
-                                          >
-                                            Clear selection
-                                          </button>
-                                        </div>
-                                        {allOptions.map(value => (
-                                          <label
-                                            key={value}
-                                            className="flex items-center px-3 py-2 hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                                          >
-                                            <input
-                                              type="checkbox"
-                                              checked={selectedValues.includes(value)}
-                                              onChange={() => toggleMultiSelectValue(col, value)}
-                                              className="mr-2 rounded text-orange-500 focus:ring-orange-500"
-                                            />
-                                            <span className="text-sm text-gray-900">{value}</span>
-                                          </label>
-                                        ))}
-                                      </div>
-                                    )}
                                   </div>
                                 </th>
                               )
@@ -1903,7 +2072,7 @@ export default function DataPage() {
                               }}>
                                 <input
                                   type="text"
-                                  placeholder={`Filter ${formatColumnName(col)}...`}
+                                  placeholder="Filter"
                                   value={pendingFilters[col] || ''}
                                   onChange={(e) => handleFilterChange(col, e.target.value)}
                                   onBlur={() => {
@@ -1921,6 +2090,117 @@ export default function DataPage() {
                         </tr>
                       )}
                     </thead>
+                    {/* Portaled filter popups (render outside table so they are not clipped by overflow) */}
+                    {openDateRangeColumn && filterPopupAnchor && typeof document !== 'undefined' && createPortal(
+                      (() => {
+                        const col = openDateRangeColumn
+                        const range = pendingDateRangeFilters[col] || { from: '', to: '' }
+                        return (
+                          <div
+                            className="filter-popup-portal min-w-[240px] bg-white border border-gray-300 rounded-lg shadow-xl p-3"
+                            style={{
+                              position: 'fixed',
+                              top: filterPopupAnchor.bottom + 4,
+                              left: filterPopupAnchor.left,
+                              zIndex: 9999,
+                            }}
+                          >
+                            <div className="text-xs font-semibold text-gray-700 mb-2">{formatColumnName(col)}</div>
+                            <div className="space-y-2">
+                              <div>
+                                <label className="block text-xs text-gray-500 mb-0.5">From</label>
+                                <input
+                                  type="date"
+                                  value={range.from}
+                                  onChange={(e) => {
+                                    const next = { ...pendingDateRangeFilters, [col]: { ...(pendingDateRangeFilters[col] || { from: '', to: '' }), from: e.target.value } }
+                                    setPendingDateRangeFilters(next)
+                                    pendingDateRangeFiltersRef.current = next
+                                  }}
+                                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs text-gray-500 mb-0.5">To</label>
+                                <input
+                                  type="date"
+                                  value={range.to}
+                                  onChange={(e) => {
+                                    const next = { ...pendingDateRangeFilters, [col]: { ...(pendingDateRangeFilters[col] || { from: '', to: '' }), to: e.target.value } }
+                                    setPendingDateRangeFilters(next)
+                                    pendingDateRangeFiltersRef.current = next
+                                  }}
+                                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                                />
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = { ...pendingDateRangeFilters, [col]: { from: '', to: '' } }
+                                setPendingDateRangeFilters(next)
+                                pendingDateRangeFiltersRef.current = next
+                              }}
+                              className="mt-2 w-full text-left px-2 py-1 text-xs text-orange-500 hover:bg-orange-50 rounded"
+                            >
+                              Clear range
+                            </button>
+                          </div>
+                        )
+                      })(),
+                      document.body
+                    )}
+                    {openDropdown && filterPopupAnchor && typeof document !== 'undefined' && multiSelectColumns.includes(openDropdown) && createPortal(
+                      (() => {
+                        const col = openDropdown
+                        const selectedValues = pendingMultiSelectFilters[col] || []
+                        const distinct = distinctColumnValues[col] || []
+                        const allOptions = (distinct.length > 0 || selectedValues.length > 0)
+                          ? [...new Set([...distinct, ...selectedValues])].sort()
+                          : getUniqueValues(col)
+                        return (
+                          <div
+                            className="filter-popup-portal min-w-max bg-white border border-gray-300 rounded-lg shadow-xl max-h-60 overflow-y-auto"
+                            style={{
+                              position: 'fixed',
+                              top: filterPopupAnchor.bottom + 4,
+                              left: filterPopupAnchor.left,
+                              width: Math.max(filterPopupAnchor.width, 160),
+                              zIndex: 9999,
+                            }}
+                          >
+                            <div className="p-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = { ...pendingMultiSelectFilters, [col]: [] }
+                                  setPendingMultiSelectFilters(next)
+                                  pendingMultiSelectFiltersRef.current = next
+                                }}
+                                className="w-full text-left px-2 py-1 text-xs text-orange-500 hover:bg-orange-50 rounded"
+                              >
+                                Clear selection
+                              </button>
+                            </div>
+                            {allOptions.map(value => (
+                              <label
+                                key={value}
+                                className="flex items-center px-3 py-2 hover:bg-gray-100 cursor-pointer whitespace-nowrap"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selectedValues.includes(value)}
+                                  onChange={() => toggleMultiSelectValue(col, value)}
+                                  className="mr-2 rounded text-orange-500 focus:ring-orange-500"
+                                />
+                                <span className="text-sm text-gray-900">{value}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )
+                      })(),
+                      document.body
+                    )}
                     <tbody className="bg-white">
                       {getSortedData().length === 0 ? (
                         <tr>
@@ -1949,9 +2229,11 @@ export default function DataPage() {
                               
                               // For formula columns, show computed value when stored value is null (e.g. new uploads or old rows)
                               if (isFormula && (cellValue === '' || row[col] == null)) {
-                                const computed = computeFormulaColumns(row)
+                                const computed = computeFormulaColumns(row, referenceDate, ratesToSgd)
                                 if (col === 'balance' && computed.balance != null) cellValue = displayValue(computed.balance)
                                 else if (col === 'reconciled_amount_check' && computed.reconciled_amount_check != null) cellValue = displayValue(computed.reconciled_amount_check)
+                                else if (col === 'balance_before_reference_dates' && computed.balance_before_reference_dates != null) cellValue = displayValue(computed.balance_before_reference_dates)
+                                else if (col === 'balance_before_reference_date_in_sgd' && computed.balance_before_reference_date_in_sgd != null) cellValue = displayValue(computed.balance_before_reference_date_in_sgd)
                               }
                               
                               // Format timestamps
@@ -1959,14 +2241,21 @@ export default function DataPage() {
                                 cellValue = formatTimestamp(cellValue)
                               }
 
+                              // Currency columns: show with 2 decimal places only (e.g. 80.2697 → 80.27)
+                              if (isCurrencyColumn(col)) cellValue = formatCurrencyForDisplay(cellValue)
+
                               const isDateField = col.includes('date')
                               const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights')
-                              
+                              // Visual reminder: red highlight when amount_received is set but payment_date is empty
+                              const hasAmountReceived = row?.amount_received != null && String(row.amount_received).trim() !== ''
+                              const hasPaymentDate = row?.payment_date != null && String(row.payment_date).trim() !== ''
+                              const needsPaymentDateReminder = col === 'payment_date' && hasAmountReceived && !hasPaymentDate
+
                               return (
                                 <td 
                                   key={col} 
-                                  className={`px-2 py-2 ${isNumericColumnForDisplay(col) ? 'text-right' : ''} ${isSelected ? 'bg-orange-200 ring-1 ring-orange-400' : ''} ${isFormula ? 'bg-blue-50/70' : isEditable ? 'bg-green-50 cursor-pointer hover:bg-green-100' : ''}`}
-                                  title={isEditable ? `Click to edit, Shift+click to select range. Ctrl+C copy, Ctrl+V paste.` : isFormula ? `${getFormulaColumnTooltip(col) ?? formatColumnName(col)} — Shift+click to select; Ctrl+C to copy.` : (cellValue ? `${cellValue} — ` : '') + 'Shift+click to select; Ctrl+C to copy.'}
+                                  className={`px-2 py-2 ${isNumericColumnForDisplay(col) ? 'text-right' : ''} ${isSelected ? 'ring-2 ring-inset ring-orange-500' : ''} ${needsPaymentDateReminder ? 'bg-red-100 border-l-4 border-red-500' : ''} ${!isSelected && !needsPaymentDateReminder && isFormula ? 'bg-blue-50/70' : !isSelected && !needsPaymentDateReminder && isEditable ? 'bg-green-50 cursor-pointer hover:bg-green-100' : ''}`}
+                                  title={needsPaymentDateReminder ? 'Amount received is set — please add payment date.' : isEditable ? `Click to edit, Shift+click to select range. Ctrl+C copy, Ctrl+V paste.` : isFormula ? `${getFormulaColumnTooltip(col) ?? formatColumnName(col)} — Shift+click to select; Ctrl+C to copy.` : (cellValue ? `${cellValue} — ` : '') + 'Shift+click to select; Ctrl+C to copy.'}
                                   style={{
                                     minWidth: col === 'id' || col === 'upload_id' ? '60px' :
                                              col === 'currency' ? '50px' :
@@ -1992,10 +2281,10 @@ export default function DataPage() {
                                       step={isNumberField && (col.includes('amount') || col.includes('balance')) ? '0.01' : '1'}
                                       value={editingValue}
                                       onChange={(e) => setEditingValue(e.target.value)}
-                                      onBlur={() => saveCellEdit(row, col, editingValue)}
+                                      onBlur={(e) => saveCellEdit(row, col, (e.target as HTMLInputElement).value)}
                                       onKeyDown={(e) => {
                                         if (e.key === 'Enter') {
-                                          saveCellEdit(row, col, editingValue)
+                                          saveCellEdit(row, col, (e.currentTarget as HTMLInputElement).value)
                                         } else if (e.key === 'Escape') {
                                           cancelCellEdit()
                                         }
@@ -2005,9 +2294,9 @@ export default function DataPage() {
                                     />
                                   ) : (
                                     <div className={`text-xs leading-normal whitespace-nowrap overflow-hidden text-ellipsis ${
-                                      isFormula ? 'text-blue-800 font-medium' : isEditable ? 'text-green-800 font-medium' : 'text-gray-900'
+                                      needsPaymentDateReminder ? 'text-red-700 font-medium' : isFormula ? 'text-blue-800 font-medium' : isEditable ? 'text-green-800 font-medium' : 'text-gray-900'
                                     } ${isNumericColumnForDisplay(col) ? 'text-right' : ''}`}>
-                                      {cellValue || (isEditable ? <span className="text-gray-400 italic">Click to edit</span> : '')}
+                                      {cellValue || (isEditable ? <span className={needsPaymentDateReminder ? 'text-red-600 italic' : 'text-gray-400 italic'}>Click to edit</span> : '')}
                                     </div>
                                   )}
                                 </td>
@@ -2024,7 +2313,7 @@ export default function DataPage() {
                 {cellSelection && (
                   <div className="bg-orange-100 border-t border-orange-200 px-3 py-1.5 text-xs text-orange-900 flex items-center gap-2 flex-wrap">
                     <span>
-                      {cellSelection.endRowIndex - cellSelection.startRowIndex + 1} cell(s) selected in {formatColumnName(cellSelection.column)} — Ctrl+C to copy; click a target cell then Ctrl+V to paste into that column. Esc to clear.
+                      {cellSelection.endRowIndex - cellSelection.startRowIndex + 1} cell(s) selected in {formatColumnName(cellSelection.column)} — Ctrl+C to copy; click a target cell then Ctrl+V to paste into that column. Paste one value into multiple cells by selecting a range, or paste multiple values starting at one cell. Esc to clear.
                     </span>
                     <button
                       type="button"
@@ -2190,6 +2479,8 @@ export default function DataPage() {
                   'total_amount_received',
                   'payment_date',
                   'balance',
+                  'balance_before_reference_dates',
+                  'balance_before_reference_date_in_sgd',
                   'reconciled_amount_check',
                   'transmission_queue_id',
                   'reference_number',
@@ -2458,7 +2749,7 @@ export default function DataPage() {
                   <div>
                     <span className="text-gray-600">Number of bookings already present in the table (duplicates): </span>
                     <span className="font-semibold text-gray-900">{(duplicateInfo.alreadyPresentCount ?? duplicateInfo.duplicates?.length ?? 0).toLocaleString()}</span>
-                    {(duplicateInfo.uniqueDuplicates as (string | number)[] | undefined)?.length > 0 && (
+                    {(duplicateInfo.uniqueDuplicates?.length ?? 0) > 0 && (
                       <span className="text-gray-500 ml-1">(e.g. {(duplicateInfo.uniqueDuplicates as (string | number)[]).slice(0, 4).join(', ')})</span>
                     )}
                   </div>
@@ -2488,5 +2779,13 @@ export default function DataPage() {
         </div>
       )}
     </div>
+  )
+}
+
+export default function DataPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center p-8"><span className="text-gray-500">Loading...</span></div>}>
+      <DataPageContent />
+    </Suspense>
   )
 }

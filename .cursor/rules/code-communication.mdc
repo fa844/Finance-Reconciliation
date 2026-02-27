@@ -7,3 +7,4 @@ alwaysApply: true
 
 - **One step at a time**: Give instructions one step at a time. Do not bundle multiple steps into a single message unless the user asks for a full sequence.
 - **Technical level**: Explain things as if talking to a relative technical beginner. Avoid jargon where possible; when using technical terms, briefly clarify them. Prefer short, clear sentences.
+- **Questions and action for me**: Even in agent mode, don't hesitate to ask clarifying questions when I ask is not 100% clear. Make any questions for me or actions for me to do (like run an SQL query on Supabase) very clear so that it pops up from the text.

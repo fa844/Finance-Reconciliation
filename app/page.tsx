@@ -13,7 +13,7 @@ export default function Home() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       if (session) {
-        router.push('/dashboard')
+        router.push('/data')
       }
     })
 
@@ -22,7 +22,7 @@ export default function Home() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session)
       if (session) {
-        router.push('/dashboard')
+        router.push('/data')
       }
     })
 
@@ -34,7 +34,7 @@ export default function Home() {
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Redirecting to dashboard...</p>
+          <p className="mt-4 text-gray-600">Redirecting to bookings...</p>
         </div>
       </div>
     )

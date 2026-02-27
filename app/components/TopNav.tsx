@@ -10,6 +10,7 @@ const PAGES = [
   { name: 'Uploads', path: '/uploads' },
   { name: 'Edits', path: '/history' },
   { name: 'Dashboard', path: '/dashboard' },
+  { name: 'Settings', path: '/settings' },
 ] as const
 
 export default function TopNav() {

@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 import { useHeaderRight } from '@/app/contexts/HeaderRightContext'
+import { getSavedFilterPrefs, saveFilterPrefs, type DashboardFilterPrefs } from '@/lib/filterPrefs'
 
 interface BookingRow {
   id: number
@@ -165,6 +166,7 @@ export default function Dashboard() {
   const [dateTo, setDateTo] = useState<string>('')
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; channels: string[]; currencies: string[]; statuses: string[] }>({ countries: [], channels: [], currencies: [], statuses: [] })
   const [openDropdown, setOpenDropdown] = useState<string | null>(null)
+  const [channelBalanceRows, setChannelBalanceRows] = useState<{ channel: string; sumBalanceBeforeRefDateSgd: number }[]>([])
   const router = useRouter()
   const { setRightContent } = useHeaderRight()
 
@@ -174,8 +176,17 @@ export default function Dashboard() {
         router.push('/login')
       } else {
         setSession(session)
+        const prefs = getSavedFilterPrefs<DashboardFilterPrefs>(session.user.id, 'dashboard')
+        if (prefs) {
+          if (Array.isArray(prefs.filterCountry)) setFilterCountry(prefs.filterCountry)
+          if (Array.isArray(prefs.filterChannel)) setFilterChannel(prefs.filterChannel)
+          if (Array.isArray(prefs.filterCurrency)) setFilterCurrency(prefs.filterCurrency)
+          if (Array.isArray(prefs.filterStatus)) setFilterStatus(prefs.filterStatus)
+          if (typeof prefs.dateFrom === 'string') setDateFrom(prefs.dateFrom)
+          if (typeof prefs.dateTo === 'string') setDateTo(prefs.dateTo)
+        }
         fetchFilterOptions()
-        fetchDashboardData()
+        // fetchDashboardData() runs from the effect below when session + filter state are set
       }
     })
 
@@ -235,21 +246,44 @@ export default function Dashboard() {
     }
   }
 
+  // Same formula as Data page: Balance before reference date in SGD (computed from row + reference_date + rates)
+  const computeBalanceBeforeRefDateInSgd = (
+    row: { net_amount_by_zuzu?: number | null; amount_received?: number | null; payment_date?: string | null; currency?: string | null },
+    refDate: string | null,
+    rates: Record<string, number>
+  ): number => {
+    const netAmount = row.net_amount_by_zuzu != null && Number.isFinite(Number(row.net_amount_by_zuzu)) ? Number(row.net_amount_by_zuzu) : null
+    if (netAmount == null || !refDate || Object.keys(rates).length === 0) return 0
+    const paymentDateRaw = row.payment_date
+    const paymentDateStr =
+      paymentDateRaw == null || paymentDateRaw === ''
+        ? null
+        : typeof paymentDateRaw === 'string'
+          ? paymentDateRaw.slice(0, 10)
+          : (paymentDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
+    const subtractAmount = paymentDateStr != null && paymentDateStr <= refDate ? (row.amount_received != null && Number.isFinite(Number(row.amount_received)) ? Number(row.amount_received) : 0) : 0
+    const balanceBeforeRefDate = netAmount - subtractAmount
+    const currencyCode = (row.currency ?? '').toString().trim().toUpperCase() || 'SGD'
+    const rate = currencyCode === 'SGD' ? 1 : (rates[currencyCode] ?? null)
+    if (rate == null || rate === 0) return 0
+    return balanceBeforeRefDate / rate
+  }
+
   const fetchDashboardData = async () => {
     setLoading(true)
     try {
-      let query = supabase
+      let countQuery = supabase
         .from('bookings')
         .select('*', { count: 'exact', head: true })
 
-      if (filterCountry.length > 0) query = query.in('country', filterCountry)
-      if (filterChannel.length > 0) query = query.in('channel', filterChannel)
-      if (filterCurrency.length > 0) query = query.in('currency', filterCurrency)
-      if (filterStatus.length > 0) query = query.in('status', filterStatus)
-      if (dateFrom) query = query.gte('created_at', `${dateFrom}T00:00:00.000Z`)
-      if (dateTo) query = query.lte('created_at', `${dateTo}T23:59:59.999Z`)
+      if (filterCountry.length > 0) countQuery = countQuery.in('country', filterCountry)
+      if (filterChannel.length > 0) countQuery = countQuery.in('channel', filterChannel)
+      if (filterCurrency.length > 0) countQuery = countQuery.in('currency', filterCurrency)
+      if (filterStatus.length > 0) countQuery = countQuery.in('status', filterStatus)
+      if (dateFrom) countQuery = countQuery.gte('created_at', `${dateFrom}T00:00:00.000Z`)
+      if (dateTo) countQuery = countQuery.lte('created_at', `${dateTo}T23:59:59.999Z`)
 
-      const { count, error } = await query
+      const { count, error } = await countQuery
 
       if (error) {
         console.error('Error fetching bookings count:', error)
@@ -257,15 +291,87 @@ export default function Dashboard() {
       } else {
         setFilteredCount(count ?? 0)
       }
+
+      // Load reference date and currency rates (same as Data page) so we can compute balance_before_reference_date_in_sgd
+      const [refRes, currencyRes] = await Promise.all([
+        supabase.from('app_settings').select('reference_date').eq('id', 1).maybeSingle(),
+        supabase.from('currency').select('currency_code, rate_to_sgd')
+      ])
+      const refDateRaw = refRes.data?.reference_date
+      const refDate =
+        refDateRaw == null
+          ? null
+          : typeof refDateRaw === 'string'
+            ? refDateRaw.slice(0, 10)
+            : (refDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
+      const rates: Record<string, number> = { SGD: 1 }
+      if (currencyRes.data) {
+        for (const r of currencyRes.data) {
+          const code = (r.currency_code ?? '').trim().toUpperCase()
+          if (!code) continue
+          if (code === 'SGD') rates[code] = 1
+          else if (r.rate_to_sgd != null && Number.isFinite(Number(r.rate_to_sgd))) rates[code] = Number(r.rate_to_sgd)
+        }
+      }
+
+      // Channel × Balance before reference date in SGD: fetch rows and compute (same formula as Data page)
+      const pageSize = 1000
+      const sumsByChannel = new Map<string, number>()
+      let from = 0
+      let hasMore = true
+      while (hasMore) {
+        let dataQuery = supabase
+          .from('bookings')
+          .select('channel, net_amount_by_zuzu, amount_received, payment_date, currency')
+          .range(from, from + pageSize - 1)
+        if (filterCountry.length > 0) dataQuery = dataQuery.in('country', filterCountry)
+        if (filterChannel.length > 0) dataQuery = dataQuery.in('channel', filterChannel)
+        if (filterCurrency.length > 0) dataQuery = dataQuery.in('currency', filterCurrency)
+        if (filterStatus.length > 0) dataQuery = dataQuery.in('status', filterStatus)
+        if (dateFrom) dataQuery = dataQuery.gte('created_at', `${dateFrom}T00:00:00.000Z`)
+        if (dateTo) dataQuery = dataQuery.lte('created_at', `${dateTo}T23:59:59.999Z`)
+
+        const { data: page, error: dataError } = await dataQuery
+        if (dataError) {
+          console.warn('Channel balance aggregation failed:', dataError.message)
+          break
+        }
+        const rows = (page ?? []) as { channel?: string | null; net_amount_by_zuzu?: number | null; amount_received?: number | null; payment_date?: string | null; currency?: string | null }[]
+        for (const row of rows) {
+          const ch = (row.channel ?? '').toString().trim() || '(empty)'
+          const num = computeBalanceBeforeRefDateInSgd(row, refDate, rates)
+          sumsByChannel.set(ch, (sumsByChannel.get(ch) ?? 0) + num)
+        }
+        hasMore = rows.length === pageSize
+        from += pageSize
+      }
+      const rows = Array.from(sumsByChannel.entries())
+        .map(([channel, sumBalanceBeforeRefDateSgd]) => ({ channel, sumBalanceBeforeRefDateSgd }))
+        .sort((a, b) => a.channel.localeCompare(b.channel))
+      setChannelBalanceRows(rows)
     } catch (e) {
       console.error(e)
       setFilteredCount(0)
+      setChannelBalanceRows([])
     }
     setLoading(false)
   }
 
   useEffect(() => {
-    if (session) fetchDashboardData()
+    if (session) {
+      fetchDashboardData()
+      // Persist current filters so they are restored next visit
+      if (session.user?.id) {
+        saveFilterPrefs(session.user.id, 'dashboard', {
+          filterCountry,
+          filterChannel,
+          filterCurrency,
+          filterStatus,
+          dateFrom,
+          dateTo,
+        })
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch when filters change
   }, [session, dateFrom, dateTo, JSON.stringify(filterCountry), JSON.stringify(filterChannel), JSON.stringify(filterCurrency), JSON.stringify(filterStatus)])
 
@@ -396,12 +502,46 @@ export default function Dashboard() {
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500" />
           </div>
         ) : (
-          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              <p className="text-sm font-medium text-gray-500">Bookings filtered</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{filteredCount.toLocaleString()}</p>
-            </div>
-          </section>
+          <>
+            <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <p className="text-sm font-medium text-gray-500">Bookings filtered</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{filteredCount.toLocaleString()}</p>
+              </div>
+            </section>
+
+            <section className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <h2 className="text-lg font-semibold text-gray-800 p-4 pb-2">Balance before reference date in SGD by channel</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr className="border-b border-gray-200 bg-gray-50">
+                      <th className="text-left text-sm font-semibold text-gray-700 px-4 py-3">Channel</th>
+                      <th className="text-right text-sm font-semibold text-gray-700 px-4 py-3">Balance before reference date in SGD</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {channelBalanceRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={2} className="px-4 py-3 text-sm text-gray-500">
+                          No data (or column not yet added to database).
+                        </td>
+                      </tr>
+                    ) : (
+                      channelBalanceRows.map(({ channel, sumBalanceBeforeRefDateSgd }) => (
+                        <tr key={channel} className="border-b border-gray-100 hover:bg-gray-50">
+                          <td className="px-4 py-3 text-sm text-gray-900">{channel}</td>
+                          <td className="px-4 py-3 text-sm text-gray-900 text-right tabular-nums">
+                            {sumBalanceBeforeRefDateSgd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </>
         )}
       </main>
     </div>
