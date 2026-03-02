@@ -27,7 +27,9 @@ const COLUMN_DISPLAY_NAMES: Record<string, string> = {
   payment_request_date: 'Payment Request Date',
   total_amount_submitted: 'Total Amount Submitted',
   amount_received: 'Amount Received',
+  payment_gateway_fees: 'Payment Gateway Fees',
   total_amount_received: 'Total Amount Received',
+  total_payment_gateway_fees: 'TOTAL Payment gateway fees',
   payment_date: 'Payment Date',
   balance: 'Balance',
   reconciled_amount_check: 'Reconciled amount Check',
@@ -41,7 +43,9 @@ const NUMERIC_COLUMNS = new Set([
   'net_of_channel_commissio_amount_extranet',
   'total_amount_submitted',
   'amount_received',
-  'total_amount_received'
+  'payment_gateway_fees',
+  'total_amount_received',
+  'total_payment_gateway_fees'
 ])
 const DATE_COLUMNS = new Set(['payment_request_date', 'payment_date'])
 
@@ -74,10 +78,12 @@ function computeFormulaColumns(
   }
   const netAmount = parseNum(row?.net_amount_by_zuzu)
   const amountReceived = parseNum(row?.amount_received) ?? 0
+  const paymentGatewayFees = parseNum(row?.payment_gateway_fees) ?? 0
   const totalSubmitted = parseNum(row?.total_amount_submitted)
   const totalReceived = parseNum(row?.total_amount_received)
-  const balance = netAmount != null ? netAmount - amountReceived : null
-  const reconciled_amount_check = (totalSubmitted != null && totalReceived != null) ? totalSubmitted - totalReceived : null
+  const totalPaymentGatewayFees = parseNum(row?.total_payment_gateway_fees)
+  const balance = netAmount != null ? netAmount - amountReceived - paymentGatewayFees : null
+  const reconciled_amount_check = (totalSubmitted != null && totalReceived != null && totalPaymentGatewayFees != null) ? totalSubmitted - totalReceived - totalPaymentGatewayFees : null
 
   let balance_before_reference_dates: number | null = null
   let balance_before_reference_date_in_sgd: number | null = null
@@ -89,7 +95,7 @@ function computeFormulaColumns(
         : typeof paymentDateRaw === 'string'
           ? String(paymentDateRaw).slice(0, 10)
           : (paymentDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
-    const subtractAmount = paymentDateStr != null && paymentDateStr <= refDate ? (parseNum(row?.amount_received) ?? 0) : 0
+    const subtractAmount = paymentDateStr != null && paymentDateStr <= refDate ? (parseNum(row?.amount_received) ?? 0) + (parseNum(row?.payment_gateway_fees) ?? 0) : 0
     balance_before_reference_dates = netAmount - subtractAmount
     if (rates) {
       const currencyCode = (row?.currency ?? '').toString().trim().toUpperCase() || 'SGD'

@@ -63,6 +63,10 @@ function DataPageContent() {
   const [cellSelection, setCellSelection] = useState<{ column: string; startRowIndex: number; endRowIndex: number } | null>(null)
   const [lastClickedCell, setLastClickedCell] = useState<{ rowIndex: number; column: string } | null>(null)
   const [downloadingCsv, setDownloadingCsv] = useState(false)
+  /** True if auth check took too long (getSession hung or very slow) so we can show a message instead of endless Loading... */
+  const [authCheckTimeout, setAuthCheckTimeout] = useState(false)
+  /** Message when data load timed out or failed so user can retry instead of endless spinner */
+  const [dataLoadError, setDataLoadError] = useState<string | null>(null)
   const router = useRouter()
   const searchParams = useSearchParams()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -96,20 +100,26 @@ function DataPageContent() {
       col === 'upload_id' ||
       col === 'number_of_room_nights' ||
       col.includes('amount') ||
+      col === 'payment_gateway_fees' ||
+      col === 'total_payment_gateway_fees' ||
       col === 'balance' ||
       col === 'balance_before_reference_dates' ||
       col === 'balance_before_reference_date_in_sgd' ||
       col === 'reconciled_amount_check' ||
+      col === 'variance_check' ||
       col === 'transmission_queue_id' ||
       col === 'reference_number')
 
   // Columns that hold currency/money: show with exactly 2 decimal places (display only; storage keeps full precision)
   const isCurrencyColumn = (col: string): boolean =>
     col.includes('amount') ||
+    col === 'payment_gateway_fees' ||
+    col === 'total_payment_gateway_fees' ||
     col === 'balance' ||
     col === 'balance_before_reference_dates' ||
     col === 'balance_before_reference_date_in_sgd' ||
-    col === 'reconciled_amount_check'
+    col === 'reconciled_amount_check' ||
+    col === 'variance_check'
 
   // Format timestamp from ISO 8601 to simple format (YYYY-MM-DD HH:MM:SS)
   const formatTimestamp = (timestamp: string | null): string => {
@@ -175,12 +185,15 @@ function DataPageContent() {
       'payment_request_date': 'Payment Request Date',
       'total_amount_submitted': 'Total Amount Submitted',
       'amount_received': 'Amount Received',
+      'payment_gateway_fees': 'Payment Gateway Fees',
       'total_amount_received': 'Total Amount Received',
+      'total_payment_gateway_fees': 'TOTAL Payment gateway fees',
       'payment_date': 'Payment Date',
       'balance': 'Balance',
       'balance_before_reference_dates': 'Balance before reference date',
       'balance_before_reference_date_in_sgd': 'Balance before reference date in SGD',
       'reconciled_amount_check': 'Reconciled amount Check',
+      'variance_check': 'Variance Check',
       'transmission_queue_id': 'Transmission Queue ID',
       'reference_number': 'Reference Number',
       'remarks': 'Remarks'
@@ -190,42 +203,56 @@ function DataPageContent() {
   }
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) {
-        router.push('/login')
-      } else {
-        setSession(session)
-        fetchTables()
-        // Automatically select bookings table; restore saved filters/sort if any
-        if (!selectedTable) {
-          setSelectedTable('bookings')
-          const prefs = getSavedFilterPrefs<DataPageFilterPrefs>(session.user.id, 'data')
-          if (prefs && (Object.keys(prefs.filters ?? {}).some(k => (prefs.filters![k] ?? '').trim()) || Object.keys(prefs.multiSelectFilters ?? {}).some(k => (prefs.multiSelectFilters![k] ?? []).length > 0) || Object.keys(prefs.dateRangeFilters ?? {}).some(k => { const r = (prefs.dateRangeFilters ?? {})[k]; return (r?.from ?? '').trim() || (r?.to ?? '').trim() }) || (prefs.sortColumn ?? '')) ) {
-            const textFilters = prefs.filters ?? {}
-            const multiFilters = prefs.multiSelectFilters ?? {}
-            const dateFilters = prefs.dateRangeFilters ?? {}
-            const sortCol = prefs.sortColumn ?? null
-            const sortDir = prefs.sortDirection === 'desc' ? 'desc' : 'asc'
-            setFilters(textFilters)
-            setMultiSelectFilters(multiFilters)
-            setDateRangeFilters(dateFilters)
-            setPendingFilters(textFilters)
-            setPendingMultiSelectFilters(multiFilters)
-            setPendingDateRangeFilters(dateFilters)
-            setSortColumn(sortCol)
-            setSortDirection(sortDir)
-            lastSortRef.current = { column: sortCol, direction: sortDir }
-            pendingFiltersRef.current = textFilters
-            pendingMultiSelectFiltersRef.current = multiFilters
-            pendingDateRangeFiltersRef.current = dateFilters
-            const hasActive = Object.keys(textFilters).some(k => (textFilters[k] ?? '').trim()) || Object.keys(multiFilters).some(k => (multiFilters[k] ?? []).length > 0) || Object.keys(dateFilters).some(k => { const r = dateFilters[k]; return (r?.from ?? '').trim() || (r?.to ?? '').trim() })
-            fetchTableData('bookings', 1, false, hasActive, { textFilters, multiFilters, dateRangeFilters: dateFilters }, sortCol, sortDir)
-          } else {
-            fetchTableData('bookings', 1)
+    const authTimeoutMs = 12_000
+    const timeoutId = window.setTimeout(() => {
+      setAuthCheckTimeout(true)
+    }, authTimeoutMs)
+
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => {
+        window.clearTimeout(timeoutId)
+        setAuthCheckTimeout(false)
+        if (!session) {
+          router.push('/login')
+        } else {
+          setSession(session)
+          fetchTables()
+          // Automatically select bookings table; restore saved filters/sort if any
+          if (!selectedTable) {
+            setSelectedTable('bookings')
+            const prefs = getSavedFilterPrefs<DataPageFilterPrefs>(session.user.id, 'data')
+            if (prefs && (Object.keys(prefs.filters ?? {}).some(k => (prefs.filters![k] ?? '').trim()) || Object.keys(prefs.multiSelectFilters ?? {}).some(k => (prefs.multiSelectFilters![k] ?? []).length > 0) || Object.keys(prefs.dateRangeFilters ?? {}).some(k => { const r = (prefs.dateRangeFilters ?? {})[k]; return (r?.from ?? '').trim() || (r?.to ?? '').trim() }) || (prefs.sortColumn ?? '')) ) {
+              const textFilters = prefs.filters ?? {}
+              const multiFilters = prefs.multiSelectFilters ?? {}
+              const dateFilters = prefs.dateRangeFilters ?? {}
+              const sortCol = prefs.sortColumn ?? null
+              const sortDir = prefs.sortDirection === 'desc' ? 'desc' : 'asc'
+              setFilters(textFilters)
+              setMultiSelectFilters(multiFilters)
+              setDateRangeFilters(dateFilters)
+              setPendingFilters(textFilters)
+              setPendingMultiSelectFilters(multiFilters)
+              setPendingDateRangeFilters(dateFilters)
+              setSortColumn(sortCol)
+              setSortDirection(sortDir)
+              lastSortRef.current = { column: sortCol, direction: sortDir }
+              pendingFiltersRef.current = textFilters
+              pendingMultiSelectFiltersRef.current = multiFilters
+              pendingDateRangeFiltersRef.current = dateFilters
+              const hasActive = Object.keys(textFilters).some(k => (textFilters[k] ?? '').trim()) || Object.keys(multiFilters).some(k => (multiFilters[k] ?? []).length > 0) || Object.keys(dateFilters).some(k => { const r = dateFilters[k]; return (r?.from ?? '').trim() || (r?.to ?? '').trim() })
+              fetchTableData('bookings', 1, false, hasActive, { textFilters, multiFilters, dateRangeFilters: dateFilters }, sortCol, sortDir)
+            } else {
+              fetchTableData('bookings', 1)
+            }
           }
         }
-      }
-    })
+      })
+      .catch(() => {
+        window.clearTimeout(timeoutId)
+        setAuthCheckTimeout(false)
+        // If we can't get the session (e.g. network error), redirect to login so the page doesn't stay stuck on "Loading..."
+        router.push('/login')
+      })
 
     const {
       data: { subscription },
@@ -237,7 +264,10 @@ function DataPageContent() {
       }
     })
 
-    return () => subscription.unsubscribe()
+    return () => {
+      window.clearTimeout(timeoutId)
+      subscription.unsubscribe()
+    }
   }, [router])
 
   // Close dropdown and date range popup when clicking outside (portaled popups use .filter-popup-portal so we don't close when clicking inside them)
@@ -340,6 +370,12 @@ function DataPageContent() {
     sortDirectionOverride?: 'asc' | 'desc'
   ) => {
     setLoading(true)
+    setDataLoadError(null)
+    const dataLoadTimeoutMs = 20_000
+    const timeoutId = window.setTimeout(() => {
+      setLoading(false)
+      setDataLoadError('Loading took too long. Check your connection and try again.')
+    }, dataLoadTimeoutMs)
     try {
       // Use override filters if provided, otherwise use state
       const activeTextFilters = filterOverrides?.textFilters ?? filters
@@ -431,8 +467,10 @@ function DataPageContent() {
 
       if (error) {
         console.error('Error fetching table data:', error)
+        setDataLoadError(error.message)
         alert(`Error: ${error.message}`)
       } else if (data && data.length > 0) {
+        setDataLoadError(null)
         // Client-side enforce multi-select filters so displayed rows always match selected values
         let rowsToSet = data
         if (applyFilters) {
@@ -463,10 +501,13 @@ function DataPageContent() {
         const reconciliationCols = [
           'net_of_demand_commission_amount_extranet',
           'net_of_channel_commissio_amount_extranet',
+          'variance_check',
           'payment_request_date',
           'total_amount_submitted',
           'amount_received',
+          'payment_gateway_fees',
           'total_amount_received',
+          'total_payment_gateway_fees',
           'payment_date',
           'balance',
           'balance_before_reference_dates',
@@ -482,23 +523,27 @@ function DataPageContent() {
           !systemColumns.includes(col) && !reconciliationCols.includes(col)
         )
         
-        // Build final order: main -> reconciliation -> system
+        // Build final order: main -> reconciliation -> system (include variance_check even if not yet in DB)
         const orderedColumns = [
           ...mainColumns,
-          ...reconciliationCols.filter(col => allColumns.includes(col)),
+          ...reconciliationCols.filter(col => allColumns.includes(col) || col === 'variance_check'),
           ...systemColumns.filter(col => allColumns.includes(col))
         ]
         setColumns(orderedColumns)
       } else {
+        setDataLoadError(null)
         if (!append) {
           setTableData([])
           setColumns([])
         }
       }
     } catch (error: any) {
+      window.clearTimeout(timeoutId)
       console.error('Error:', error)
+      setDataLoadError(error?.message ?? 'Something went wrong loading the data.')
       alert(`Error: ${error.message}`)
     }
+    window.clearTimeout(timeoutId)
     setLoading(false)
   }
 
@@ -851,6 +896,7 @@ function DataPageContent() {
       ...editFormData,
       balance: computed.balance,
       reconciled_amount_check: computed.reconciled_amount_check,
+      variance_check: computed.variance_check,
       balance_before_reference_dates: computed.balance_before_reference_dates,
       balance_before_reference_date_in_sgd: computed.balance_before_reference_date_in_sgd,
       updated_at: new Date().toISOString()
@@ -871,7 +917,9 @@ function DataPageContent() {
         'payment_request_date',
         'total_amount_submitted',
         'amount_received',
+        'payment_gateway_fees',
         'total_amount_received',
+        'total_payment_gateway_fees',
         'payment_date',
         'transmission_queue_id',
         'reference_number',
@@ -919,6 +967,9 @@ function DataPageContent() {
     if (bal !== null) updateData.balance = bal
     const recon = safeNum(computed.reconciled_amount_check)
     if (recon !== null) updateData.reconciled_amount_check = recon
+    // Omit variance_check from payload so updates succeed when the optional migration (supabase-add-variance-check.sql) hasn't been run. UI still shows it from computed.variance_check in local state.
+    // const variance = safeNum(computed.variance_check)
+    // if (variance !== null) updateData.variance_check = variance
 
     const { error } = await supabase
       .from(selectedTable)
@@ -943,6 +994,7 @@ function DataPageContent() {
               [column]: valueToSave,
               balance: computed.balance,
               reconciled_amount_check: computed.reconciled_amount_check,
+              variance_check: computed.variance_check,
               balance_before_reference_dates: computed.balance_before_reference_dates,
               balance_before_reference_date_in_sgd: computed.balance_before_reference_date_in_sgd,
               updated_at: updateData.updated_at
@@ -1070,6 +1122,24 @@ function DataPageContent() {
     setAnchorCell(null)
   }
 
+  const clearSelectedCellsContent = async () => {
+    if (!cellSelection || !isColumnEditable(cellSelection.column)) return
+    const count = cellSelection.endRowIndex - cellSelection.startRowIndex + 1
+    if (count > 5) {
+      const ok = window.confirm(
+        `You have selected ${count} cells. Are you sure you want to clear their content? Click OK to confirm.`
+      )
+      if (!ok) return
+    }
+    const sorted = getSortedData()
+    for (let i = cellSelection.startRowIndex; i <= cellSelection.endRowIndex; i++) {
+      const row = sorted[i]
+      if (row) await saveCellEdit(row, cellSelection.column, '')
+    }
+    setCellSelection(null)
+    setAnchorCell(null)
+  }
+
   const handleTableKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
       handleCopy(e)
@@ -1083,6 +1153,14 @@ function DataPageContent() {
       setCellSelection(null)
       setAnchorCell(null)
     }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      const target = e.target as HTMLElement
+      if (target.closest('input, textarea')) return
+      if (cellSelection && isColumnEditable(cellSelection.column)) {
+        e.preventDefault()
+        clearSelectedCellsContent()
+      }
+    }
   }
 
   // Parse a value as number; null/undefined/empty string/NaN -> null
@@ -1093,9 +1171,10 @@ function DataPageContent() {
   }
 
   // Recompute Balance, Reconciled amount Check, and balance-before-reference-date columns.
-  // Balance = Net amount by ZUZU - Amount received (null amount_received treated as 0)
-  // Balance before reference date = net - amount_received only when payment_date is not null and payment_date <= reference_date
+  // Balance = Net amount by ZUZU - Amount received - Payment Gateway Fees (nulls treated as 0)
+  // Balance before reference date = net - (amount_received + payment_gateway_fees) only when payment_date <= reference_date
   // Balance before reference date in SGD = balance_before_reference_dates / rate_to_sgd (SGD = 1)
+  // Reconciled amount Check = Total amount submitted - Total amount received - Total payment gateway fees (all three required non-null)
   const computeFormulaColumns = (
     row: any,
     refDate?: string | null,
@@ -1103,15 +1182,20 @@ function DataPageContent() {
   ): {
     balance: number | null
     reconciled_amount_check: number | null
+    variance_check: number | null
     balance_before_reference_dates: number | null
     balance_before_reference_date_in_sgd: number | null
   } => {
     const netAmount = parseNum(row?.net_amount_by_zuzu)
     const amountReceived = parseNum(row?.amount_received) ?? 0
+    const paymentGatewayFees = parseNum(row?.payment_gateway_fees) ?? 0
     const totalSubmitted = parseNum(row?.total_amount_submitted)
     const totalReceived = parseNum(row?.total_amount_received)
-    const balance = netAmount != null ? netAmount - amountReceived : null
-    const reconciled_amount_check = (totalSubmitted != null && totalReceived != null) ? totalSubmitted - totalReceived : null
+    const totalPaymentGatewayFees = parseNum(row?.total_payment_gateway_fees)
+    const extranet = parseNum(row?.net_of_channel_commissio_amount_extranet)
+    const balance = netAmount != null ? netAmount - amountReceived - paymentGatewayFees : null
+    const reconciled_amount_check = (totalSubmitted != null && totalReceived != null && totalPaymentGatewayFees != null) ? totalSubmitted - totalReceived - totalPaymentGatewayFees : null
+    const variance_check = (netAmount != null && extranet != null) ? netAmount - extranet : null
 
     let balance_before_reference_dates: number | null = null
     let balance_before_reference_date_in_sgd: number | null = null
@@ -1124,7 +1208,9 @@ function DataPageContent() {
             ? paymentDateRaw.slice(0, 10)
             : (paymentDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
       const subtractAmount =
-        paymentDateStr != null && paymentDateStr <= refDate ? (parseNum(row?.amount_received) ?? 0) : 0
+        paymentDateStr != null && paymentDateStr <= refDate
+          ? (parseNum(row?.amount_received) ?? 0) + (parseNum(row?.payment_gateway_fees) ?? 0)
+          : 0
       balance_before_reference_dates = netAmount - subtractAmount
 
       if (rates) {
@@ -1139,20 +1225,22 @@ function DataPageContent() {
     return {
       balance,
       reconciled_amount_check,
+      variance_check,
       balance_before_reference_dates,
       balance_before_reference_date_in_sgd
     }
   }
 
   // Formula-derived columns; read-only, shown in distinct color (currency is read-only but styled grey like country)
-  const isFormulaColumn = (column: string): boolean => column === 'balance' || column === 'balance_before_reference_dates' || column === 'balance_before_reference_date_in_sgd' || column === 'reconciled_amount_check'
+  const isFormulaColumn = (column: string): boolean => column === 'balance' || column === 'balance_before_reference_dates' || column === 'balance_before_reference_date_in_sgd' || column === 'reconciled_amount_check' || column === 'variance_check'
 
   // Tooltip text shown when hovering over formula column header or cell
   const getFormulaColumnTooltip = (column: string): string | null => {
-    if (column === 'balance') return 'Net amount by ZUZU - Amount received'
-    if (column === 'balance_before_reference_dates') return 'Balance, ignoring any payments done after the reference date.'
+    if (column === 'balance') return 'Net amount by ZUZU - Amount received - Payment Gateway Fees'
+    if (column === 'balance_before_reference_dates') return 'Balance, ignoring any payments done after the reference date (subtracts amount received + Payment Gateway Fees only when payment_date ≤ reference date).'
     if (column === 'balance_before_reference_date_in_sgd') return 'Balance (before reference date) converted to SGD'
-    if (column === 'reconciled_amount_check') return 'Total amount submitted - Total amount received'
+    if (column === 'reconciled_amount_check') return 'Total amount submitted - Total amount received - TOTAL Payment gateway fees'
+    if (column === 'variance_check') return 'Net amount by ZUZU − Net (of channel commission) amount (Extranet)'
     return null
   }
 
@@ -1173,7 +1261,9 @@ function DataPageContent() {
       'payment_request_date',
       'total_amount_submitted',
       'amount_received',
+      'payment_gateway_fees',
       'total_amount_received',
+      'total_payment_gateway_fees',
       'payment_date',
       'transmission_queue_id',
       'reference_number',
@@ -1281,16 +1371,12 @@ function DataPageContent() {
         const num = Number(processed.net_amount_by_zuzu)
         processed.net_amount_by_zuzu = -Math.abs(num)
       }
-      // Balance = net_amount_by_zuzu - amount_received (treat null amount_received as 0)
-      if (processed.net_amount_by_zuzu != null) {
-        const netAmount = Number(processed.net_amount_by_zuzu)
-        const amountReceived = processed.amount_received != null ? Number(processed.amount_received) : 0
-        processed.balance = netAmount - amountReceived
-      }
-      // Balance before reference date and in SGD (same logic as computeFormulaColumns)
+      // Balance and other formula columns (same logic as computeFormulaColumns)
       const computed = computeFormulaColumns(processed, refDate, ratesToSgdMap)
+      if (computed.balance != null) processed.balance = computed.balance
       if (computed.balance_before_reference_dates != null) processed.balance_before_reference_dates = computed.balance_before_reference_dates
       if (computed.balance_before_reference_date_in_sgd != null) processed.balance_before_reference_date_in_sgd = computed.balance_before_reference_date_in_sgd
+      if (computed.variance_check != null) processed.variance_check = computed.variance_check
       return processed
     })
   }
@@ -1870,6 +1956,22 @@ function DataPageContent() {
   }, [session, selectedTable, showFilters, filters, multiSelectFilters, dateRangeFilters, loading, downloadingCsv, setRightContent])
 
   if (!session) {
+    if (authCheckTimeout) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-100">
+          <div className="text-center max-w-sm">
+            <p className="text-gray-700 mb-4">Checking your session is taking longer than usual. This can happen if the connection is slow or the server is busy.</p>
+            <button
+              type="button"
+              onClick={() => router.push('/login')}
+              className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600"
+            >
+              Go to login
+            </button>
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
         <div className="text-center">
@@ -1915,6 +2017,22 @@ function DataPageContent() {
               <div className="bg-white rounded-lg shadow p-8 text-center">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500 mx-auto"></div>
                 <p className="mt-4 text-gray-600">Loading data...</p>
+              </div>
+            ) : dataLoadError ? (
+              <div className="bg-white rounded-lg shadow p-8 text-center">
+                <p className="text-gray-700 mb-4">{dataLoadError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDataLoadError(null)
+                    const hasActive = Object.keys(filters).some(k => (filters[k] ?? '').trim()) || Object.keys(multiSelectFilters).some(k => (multiSelectFilters[k] ?? []).length > 0) || Object.keys(dateRangeFilters).some(k => { const r = dateRangeFilters[k]; return (r?.from ?? '').trim() || (r?.to ?? '').trim() })
+                    const page = hasActive ? filteredPage : currentPage
+                    fetchTableData(selectedTable!, page, false, hasActive, undefined, sortColumn, sortDirection)
+                  }}
+                  className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600"
+                >
+                  Retry
+                </button>
               </div>
             ) : (
               <div className="bg-white rounded-lg shadow-lg border-t-4 border-orange-500">
@@ -2232,6 +2350,7 @@ function DataPageContent() {
                                 const computed = computeFormulaColumns(row, referenceDate, ratesToSgd)
                                 if (col === 'balance' && computed.balance != null) cellValue = displayValue(computed.balance)
                                 else if (col === 'reconciled_amount_check' && computed.reconciled_amount_check != null) cellValue = displayValue(computed.reconciled_amount_check)
+                                else if (col === 'variance_check' && computed.variance_check != null) cellValue = displayValue(computed.variance_check)
                                 else if (col === 'balance_before_reference_dates' && computed.balance_before_reference_dates != null) cellValue = displayValue(computed.balance_before_reference_dates)
                                 else if (col === 'balance_before_reference_date_in_sgd' && computed.balance_before_reference_date_in_sgd != null) cellValue = displayValue(computed.balance_before_reference_date_in_sgd)
                               }
@@ -2245,7 +2364,7 @@ function DataPageContent() {
                               if (isCurrencyColumn(col)) cellValue = formatCurrencyForDisplay(cellValue)
 
                               const isDateField = col.includes('date')
-                              const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights')
+                              const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')
                               // Visual reminder: red highlight when amount_received is set but payment_date is empty
                               const hasAmountReceived = row?.amount_received != null && String(row.amount_received).trim() !== ''
                               const hasPaymentDate = row?.payment_date != null && String(row.payment_date).trim() !== ''
@@ -2322,6 +2441,15 @@ function DataPageContent() {
                     >
                       Clear selection
                     </button>
+                    {isColumnEditable(cellSelection.column) && (
+                      <button
+                        type="button"
+                        onClick={() => clearSelectedCellsContent()}
+                        className="text-red-600 hover:text-red-800 font-medium"
+                      >
+                        Delete
+                      </button>
+                    )}
                   </div>
                 )}
                 
@@ -2473,10 +2601,13 @@ function DataPageContent() {
                 const reconciliationColumns = [
                   'net_of_demand_commission_amount_extranet',
                   'net_of_channel_commissio_amount_extranet',
+                  'variance_check',
                   'payment_request_date',
                   'total_amount_submitted',
                   'amount_received',
+                  'payment_gateway_fees',
                   'total_amount_received',
+                  'total_payment_gateway_fees',
                   'payment_date',
                   'balance',
                   'balance_before_reference_dates',
@@ -2506,7 +2637,7 @@ function DataPageContent() {
                           {excelCols.map((col) => {
                             const value = modalMode === 'add' ? newRowData[col] : editFormData[col]
                             const isDateField = col.includes('date')
-                            const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights')
+                            const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')
                             const isReadOnly = modalMode === 'edit'
 
                             return (
@@ -2550,7 +2681,7 @@ function DataPageContent() {
                           {reconCols.map((col) => {
                             const value = modalMode === 'add' ? newRowData[col] : editFormData[col]
                             const isDateField = col.includes('date')
-                            const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights')
+                            const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')
                             const isTextArea = col.includes('remarks') || col.includes('reconciled_amount_check')
                             const isFormula = isFormulaColumn(col)
                             

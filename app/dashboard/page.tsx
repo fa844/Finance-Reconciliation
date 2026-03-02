@@ -248,7 +248,7 @@ export default function Dashboard() {
 
   // Same formula as Data page: Balance before reference date in SGD (computed from row + reference_date + rates)
   const computeBalanceBeforeRefDateInSgd = (
-    row: { net_amount_by_zuzu?: number | null; amount_received?: number | null; payment_date?: string | null; currency?: string | null },
+    row: { net_amount_by_zuzu?: number | null; amount_received?: number | null; payment_gateway_fees?: number | null; payment_date?: string | null; currency?: string | null },
     refDate: string | null,
     rates: Record<string, number>
   ): number => {
@@ -261,8 +261,9 @@ export default function Dashboard() {
         : typeof paymentDateRaw === 'string'
           ? paymentDateRaw.slice(0, 10)
           : (paymentDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
-    const subtractAmount = paymentDateStr != null && paymentDateStr <= refDate ? (row.amount_received != null && Number.isFinite(Number(row.amount_received)) ? Number(row.amount_received) : 0) : 0
-    const balanceBeforeRefDate = netAmount - subtractAmount
+    const amountReceived = paymentDateStr != null && paymentDateStr <= refDate ? (row.amount_received != null && Number.isFinite(Number(row.amount_received)) ? Number(row.amount_received) : 0) : 0
+    const gatewayFees = paymentDateStr != null && paymentDateStr <= refDate ? (row.payment_gateway_fees != null && Number.isFinite(Number(row.payment_gateway_fees)) ? Number(row.payment_gateway_fees) : 0) : 0
+    const balanceBeforeRefDate = netAmount - amountReceived - gatewayFees
     const currencyCode = (row.currency ?? '').toString().trim().toUpperCase() || 'SGD'
     const rate = currencyCode === 'SGD' ? 1 : (rates[currencyCode] ?? null)
     if (rate == null || rate === 0) return 0
@@ -322,7 +323,7 @@ export default function Dashboard() {
       while (hasMore) {
         let dataQuery = supabase
           .from('bookings')
-          .select('channel, net_amount_by_zuzu, amount_received, payment_date, currency')
+          .select('channel, net_amount_by_zuzu, amount_received, payment_gateway_fees, payment_date, currency')
           .range(from, from + pageSize - 1)
         if (filterCountry.length > 0) dataQuery = dataQuery.in('country', filterCountry)
         if (filterChannel.length > 0) dataQuery = dataQuery.in('channel', filterChannel)
@@ -336,7 +337,7 @@ export default function Dashboard() {
           console.warn('Channel balance aggregation failed:', dataError.message)
           break
         }
-        const rows = (page ?? []) as { channel?: string | null; net_amount_by_zuzu?: number | null; amount_received?: number | null; payment_date?: string | null; currency?: string | null }[]
+        const rows = (page ?? []) as { channel?: string | null; net_amount_by_zuzu?: number | null; amount_received?: number | null; payment_gateway_fees?: number | null; payment_date?: string | null; currency?: string | null }[]
         for (const row of rows) {
           const ch = (row.channel ?? '').toString().trim() || '(empty)'
           const num = computeBalanceBeforeRefDateInSgd(row, refDate, rates)
