@@ -80,10 +80,11 @@ function computeFormulaColumns(
   const netAmount = parseNum(row?.net_amount_by_zuzu)
   const amountReceived = parseNum(row?.amount_received) ?? 0
   const paymentGatewayFees = parseNum(row?.payment_gateway_fees) ?? 0
+  const taxAmountDeducted = parseNum(row?.tax_amount_deducted) ?? 0
   const totalSubmitted = parseNum(row?.total_amount_submitted)
   const totalReceived = parseNum(row?.total_amount_received)
   const totalPaymentGatewayFees = parseNum(row?.total_payment_gateway_fees)
-  const balance = netAmount != null ? netAmount - amountReceived - paymentGatewayFees : null
+  const balance = netAmount != null ? netAmount - amountReceived - paymentGatewayFees - taxAmountDeducted : null
   const reconciled_amount_check = (totalSubmitted != null && totalReceived != null && totalPaymentGatewayFees != null) ? totalSubmitted - totalReceived - totalPaymentGatewayFees : null
 
   let balance_before_reference_dates: number | null = null

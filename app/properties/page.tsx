@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 
@@ -27,6 +27,8 @@ export default function PropertiesPage() {
   const [editForm, setEditForm] = useState<Record<string, string>>({})
   const [actionError, setActionError] = useState<string | null>(null)
   const router = useRouter()
+  // Cache discovered order column so we don't need an extra sample query on every load
+  const orderColumnRef = useRef<string | null>(null)
 
   const editableColumns = columns.filter((c) => c !== 'id' && c !== 'created_at')
   const isTextColumn = (col: string) => TEXT_COLUMNS.includes(col)
@@ -39,12 +41,24 @@ export default function PropertiesPage() {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
       if (!session) {
-        router.replace('/')
-        return
+        router.push('/login')
+      } else {
+        setSession(session)
       }
     })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        router.push('/login')
+      } else {
+        setSession(session)
+      }
+    })
+
+    return () => subscription.unsubscribe()
   }, [router])
 
   useEffect(() => {
@@ -56,10 +70,7 @@ export default function PropertiesPage() {
     const fetchData = async () => {
       setLoading(true)
       setFetchError(null)
-      // Get one row to discover column names and pick an order column (table may use hms_id or id)
-      const { data: sample } = await supabase.from('properties').select('*').limit(1)
-      const cols = sample?.[0] ? Object.keys(sample[0]).filter((k) => k !== 'created_at') : []
-      const orderColumn = cols.find((c) => c === 'hms_id' || c === 'id') ?? cols[0]
+      const orderColumn = orderColumnRef.current
 
       let query = supabase
         .from('properties')
@@ -76,18 +87,17 @@ export default function PropertiesPage() {
         console.error('Properties fetch error:', error)
         setFetchError(error.message || 'Could not load properties')
         setRows([])
-        setColumns([])
         setTotalCount(0)
       } else {
         if (count != null) setTotalCount(count)
         const rowList = (data ?? []) as Record<string, unknown>[]
         setRows(rowList)
-        if (rowList.length > 0 && cols.length === 0) {
-          setColumns(Object.keys(rowList[0]).filter((k) => k !== 'created_at'))
-        } else if (cols.length > 0) {
-          setColumns(cols)
-        } else {
-          setColumns(['id', 'col_b', 'col_c', 'col_d', 'col_e', 'col_f', 'col_g', 'col_h', 'col_i', 'col_j', 'col_k', 'col_l', 'col_m'])
+        if (rowList.length > 0) {
+          const discovered = Object.keys(rowList[0]).filter((k) => k !== 'created_at')
+          setColumns(discovered)
+          if (!orderColumnRef.current) {
+            orderColumnRef.current = discovered.find((c) => c === 'hms_id' || c === 'id') ?? discovered[0] ?? null
+          }
         }
       }
       setLoading(false)
@@ -104,13 +114,18 @@ export default function PropertiesPage() {
 
   const refetch = () => setRefreshCounter((c) => c + 1)
 
-  const handleAdd = async () => {
-    setActionError(null)
+  const buildPayload = (form: Record<string, string>): Record<string, string | null> => {
     const payload: Record<string, string | null> = {}
     editableColumns.forEach((col) => {
-      const v = addForm[col]?.trim()
+      const v = form[col]?.trim()
       payload[col] = v === '' ? null : (v ?? null)
     })
+    return payload
+  }
+
+  const handleAdd = async () => {
+    setActionError(null)
+    const payload = buildPayload(addForm)
     const { error } = await supabase.from('properties').insert(payload)
     if (error) {
       setActionError(error.message || 'Failed to add row')
@@ -124,11 +139,7 @@ export default function PropertiesPage() {
   const handleEditSave = async () => {
     if (editingRowId == null) return
     setActionError(null)
-    const payload: Record<string, string | null> = {}
-    editableColumns.forEach((col) => {
-      const v = editForm[col]?.trim()
-      payload[col] = v === '' ? null : (v ?? null)
-    })
+    const payload = buildPayload(editForm)
     const { error } = await supabase
       .from('properties')
       .update(payload)
@@ -433,8 +444,7 @@ export default function PropertiesPage() {
                                     setActionError(null)
                                     setEditForm(
                                       Object.fromEntries(
-                                        columns
-                                          .filter((c) => c !== 'id' && c !== 'created_at')
+                                        editableColumns
                                           .map((c) => [
                                             c,
                                             displayValue(row[c]),

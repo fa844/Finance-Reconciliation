@@ -39,6 +39,10 @@ function parseNum(v: any): number | null {
   return Number.isNaN(n) ? null : n
 }
 
+function safeNum(n: number | null | undefined): number | null {
+  return n != null && Number.isFinite(n) ? Math.round(n * 100) / 100 : null
+}
+
 function normalizeDateForDb(value: any): string | null {
   if (value == null || value === '') return null
   const s = String(value).trim()
@@ -136,10 +140,9 @@ export default function BulkUpdatePage() {
     const rows = lines.map(line => line.split('\t').map(cell => cell.trim()))
 
     const maxCols = Math.max(...rows.map(r => r.length))
-    const normalizedRows = rows.map(r => {
-      while (r.length < maxCols) r.push('')
-      return r
-    })
+    const normalizedRows = rows.map(r =>
+      r.length < maxCols ? [...r, ...new Array(maxCols - r.length).fill('')] : r
+    )
 
     setParsedRows(normalizedRows)
 
@@ -170,13 +173,11 @@ export default function BulkUpdatePage() {
 
   const allColumnsMapped = columnMappings.length > 0 && columnMappings.every(m => m !== '')
 
-  const hasDuplicateMappings = () => {
-    const selected = columnMappings.filter(m => m)
-    return new Set(selected).size !== selected.length
-  }
+  const selected = columnMappings.filter(m => m)
+  const hasDuplicateMappings = new Set(selected).size !== selected.length
 
   const handleUpdate = async () => {
-    if (!parsedRows.length || !allColumnsMapped || hasDuplicateMappings()) return
+    if (!parsedRows.length || !allColumnsMapped || hasDuplicateMappings) return
 
     setUpdating(true)
     setResults(null)
@@ -249,9 +250,6 @@ export default function BulkUpdatePage() {
           const updatedRow = { ...booking, ...updateData }
           const computed = computeFormulaColumns(updatedRow)
 
-          const safeNum = (n: number | null | undefined): number | null =>
-            n != null && Number.isFinite(n) ? Math.round(n * 100) / 100 : null
-
           const bal = safeNum(computed.balance)
           if (bal !== null) updateData.balance = bal
           const recon = safeNum(computed.reconciled_amount_check)
@@ -266,6 +264,7 @@ export default function BulkUpdatePage() {
             allSucceeded = false
             errorMsg = updateError.message
           } else {
+            const historyRecords = []
             for (let c = 0; c < columnMappings.length; c++) {
               const dbColumn = columnMappings[c]
               const oldVal = booking[dbColumn]
@@ -273,7 +272,7 @@ export default function BulkUpdatePage() {
               const oldStr = oldVal == null ? '' : String(oldVal)
               const newStr = newVal == null ? '' : String(newVal)
               if (oldStr !== newStr) {
-                await supabase.from('edit_history').insert({
+                historyRecords.push({
                   table_name: 'bookings',
                   row_id: booking.id,
                   column_name: dbColumn,
@@ -283,6 +282,9 @@ export default function BulkUpdatePage() {
                   row_display: `Confirmation #${booking.zuzu_room_confirmation_number ?? booking.id}`,
                 })
               }
+            }
+            if (historyRecords.length > 0) {
+              await supabase.from('edit_history').insert(historyRecords)
             }
           }
         }
@@ -390,7 +392,7 @@ export default function BulkUpdatePage() {
                   </div>
                 ))}
               </div>
-              {hasDuplicateMappings() && (
+              {hasDuplicateMappings && (
                 <p className="mt-2 text-sm text-red-600 font-medium">
                   Each column must be mapped to a different field.
                 </p>
@@ -448,7 +450,7 @@ export default function BulkUpdatePage() {
             <div className="mb-6 flex items-center gap-4">
               <button
                 onClick={handleUpdate}
-                disabled={updating || !allColumnsMapped || hasDuplicateMappings()}
+                disabled={updating || !allColumnsMapped || hasDuplicateMappings}
                 className="bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white px-6 py-2.5 rounded-lg text-sm font-semibold transition duration-200 flex items-center gap-2"
               >
                 {updating ? (
