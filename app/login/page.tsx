@@ -26,7 +26,7 @@ export default function Login() {
       setError(error.message)
       setLoading(false)
     } else {
-      router.push('/dashboard')
+      router.push('/data')
     }
   }
 

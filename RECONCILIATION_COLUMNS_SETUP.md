@@ -12,27 +12,33 @@ The following 11 reconciliation columns have been added to track payment and rec
 2. **payment_request_date** (DATE) - Payment Request Date
 3. **total_amount_submitted** (DECIMAL) - Total Amount Submitted
 4. **amount_received** (DECIMAL) - Amount Received
-5. **total_amount_received** (DECIMAL) - Total Amount Received
-6. **payment_date** (DATE) - Payment Date
-7. **balance** (DECIMAL) - Balance
-8. **reconciled_amount_check** (TEXT) - Reconciled amount Check
-9. **transmission_queue_id** (TEXT) - Transmission Queue ID
-10. **reference_number** (TEXT) - Reference Number
-11. **remarks** (TEXT) - Remarks
+5. **payment_gateway_fees** (DECIMAL) - Payment Gateway Fees
+6. **total_amount_received** (DECIMAL) - Total Amount Received
+7. **total_payment_gateway_fees** (DECIMAL) - TOTAL Payment gateway fees
+8. **payment_date** (DATE) - Payment Date
+9. **balance** (DECIMAL) - Balance
+10. **reconciled_amount_check** (TEXT) - Reconciled amount Check
+11. **transmission_queue_id** (TEXT) - Transmission Queue ID
+12. **reference_number** (TEXT) - Reference Number
+13. **remarks** (TEXT) - Remarks
 
-### Running the Migration
+### Running the Migrations
 
-To add these columns to your database, execute the SQL migration file:
+To add these columns to your database, execute the SQL migration files (in order):
+
+1. **add-reconciliation-columns.sql** – core reconciliation columns
+2. **add-payment-gateway-fees-columns.sql** – Payment Gateway Fees and TOTAL Payment gateway fees
 
 ```bash
 # Connect to your Supabase database using the SQL Editor or psql
 psql -h your-database-host -U your-username -d your-database-name -f add-reconciliation-columns.sql
+psql -h your-database-host -U your-username -d your-database-name -f add-payment-gateway-fees-columns.sql
 ```
 
 Or in Supabase Dashboard:
 1. Go to SQL Editor
-2. Open `add-reconciliation-columns.sql`
-3. Click "Run" to execute the migration
+2. Open `add-reconciliation-columns.sql`, then click "Run"
+3. Open `add-payment-gateway-fees-columns.sql`, then click "Run"
 
 ## Dashboard Changes
 

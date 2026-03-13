@@ -26,6 +26,9 @@ UPDATE bookings SET currency = 'JPY' WHERE LOWER(country) = 'japan';
 -- South Korea -> KRW
 UPDATE bookings SET currency = 'KRW' WHERE LOWER(country) = 'south korea';
 
+-- Laos -> LAK
+UPDATE bookings SET currency = 'LAK' WHERE LOWER(country) = 'laos';
+
 -- Hong Kong -> HKD
 UPDATE bookings SET currency = 'HKD' WHERE LOWER(country) = 'hong kong';
 

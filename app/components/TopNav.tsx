@@ -10,6 +10,8 @@ const PAGES = [
   { name: 'Uploads', path: '/uploads' },
   { name: 'Edits', path: '/history' },
   { name: 'Dashboard', path: '/dashboard' },
+  { name: 'Settings', path: '/settings' },
+  { name: 'Properties', path: '/properties' },
 ] as const
 
 export default function TopNav() {
@@ -18,9 +20,9 @@ export default function TopNav() {
 
   return (
     <nav className="sticky top-0 z-50 bg-white border-b-4 border-orange-500 shadow-md">
-      <div className="max-w-7xl mx-auto pl-0 pr-4 sm:pr-6 lg:pr-8 py-2">
-        <div className="flex flex-nowrap justify-between items-center gap-4 min-w-0">
-          <div className="flex flex-wrap items-center gap-3 min-w-0 -ml-1">
+      <div className="w-full max-w-[100vw] px-4 sm:px-6 lg:px-8 py-2 overflow-x-auto">
+        <div className="flex flex-nowrap justify-between items-center gap-4 w-full min-w-max">
+          <div className="flex flex-nowrap items-center gap-2 sm:gap-3 min-w-0 -ml-1 shrink-0">
             <Link
               href="/data"
               className="shrink-0 -ml-2 flex items-center no-underline"
