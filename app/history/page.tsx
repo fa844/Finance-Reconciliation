@@ -26,6 +26,7 @@ const COLUMN_DISPLAY_NAMES: Record<string, string> = {
   net_of_channel_commissio_amount_extranet: 'Net (of channel commission) amount (Extranet)',
   payment_request_date: 'Payment Request Date',
   total_amount_submitted: 'Total Amount Submitted',
+  payment_method: 'Payment Method',
   amount_received: 'Amount Received',
   payment_gateway_fees: 'Payment Gateway Fees',
   total_amount_received: 'Total Amount Received',
@@ -143,6 +144,7 @@ export default function HistoryOfEditsPage() {
   const [totalEditCount, setTotalEditCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [currentPage, setCurrentPage] = useState(1)
   const [undoingId, setUndoingId] = useState<number | null>(null)
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [pendingFilters, setPendingFilters] = useState<Record<string, string>>({})
@@ -441,11 +443,66 @@ export default function HistoryOfEditsPage() {
           alert(`Error loading edit history: ${error.message}`)
         } else {
           setEdits((data as EditHistoryRow[]) || [])
+          setCurrentPage(1)
         }
       }
     } finally {
       if (append) setLoadingMore(false)
       if (showLoading) setLoading(false)
+    }
+  }
+
+  const goToPage = async (page: number) => {
+    if (page < 1) return
+    setLoading(true)
+    try {
+      const activeText = filters
+      const activeMulti = multiSelectFilters
+      const activeDateRange = dateRangeFilters
+      const hasFilters =
+        Object.keys(activeText).some(k => (activeText[k] ?? '').trim()) ||
+        Object.keys(activeMulti).some(k => (activeMulti[k] ?? []).length > 0) ||
+        Object.keys(activeDateRange).some(k => {
+          const r = activeDateRange[k]
+          return (r?.from ?? '').trim() || (r?.to ?? '').trim()
+        })
+
+      const applyFiltersToQuery = (q: ReturnType<typeof supabase.from>, selectOptions?: { count: 'exact'; head: boolean }) => {
+        let query = selectOptions ? q.select('*', selectOptions) : q.select('*')
+        query = query.order('edited_at', { ascending: false })
+        if (!hasFilters) return query
+        Object.keys(activeText).forEach(column => {
+          const filterValue = (activeText[column] ?? '').trim()
+          if (filterValue) {
+            query = query.ilike(column, `%${filterValue}%`)
+          }
+        })
+        MULTI_SELECT_FILTER_COLUMNS.forEach(column => {
+          const selectedValues = (activeMulti[column] ?? []).map(v => String(v).trim()).filter(Boolean)
+          if (selectedValues.length > 0) {
+            query = query.in(column, selectedValues)
+          }
+        })
+        Object.keys(activeDateRange).forEach(column => {
+          const { from, to } = activeDateRange[column] || {}
+          if (from?.trim()) query = query.gte(column, from.trim() + 'T00:00:00.000Z')
+          if (to?.trim()) query = query.lte(column, to.trim() + 'T23:59:59.999Z')
+        })
+        return query
+      }
+
+      const rangeFrom = (page - 1) * EDITS_PAGE_SIZE
+      const rangeTo = rangeFrom + EDITS_PAGE_SIZE - 1
+      const { data, error } = await applyFiltersToQuery(supabase.from('edit_history')).range(rangeFrom, rangeTo)
+      if (error) {
+        console.error('Error navigating to page:', error)
+        alert(`Error loading page: ${error.message}`)
+      } else {
+        setEdits((data as EditHistoryRow[]) || [])
+        setCurrentPage(page)
+      }
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -951,25 +1008,55 @@ export default function HistoryOfEditsPage() {
               <p className="text-sm text-gray-600">
                 Showing {edits.length} of {hasActiveFilters && totalFilteredCount != null ? totalFilteredCount : totalEditCount} edit{(hasActiveFilters && totalFilteredCount != null ? totalFilteredCount : totalEditCount) !== 1 ? 's' : ''} (most recent first).
               </p>
-              {edits.length < (hasActiveFilters && totalFilteredCount != null ? totalFilteredCount : totalEditCount) && (
-                <button
-                  onClick={() => fetchEdits(false, true)}
-                  disabled={loadingMore}
-                  className="px-4 py-2 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-lg text-sm font-semibold transition duration-200 flex items-center justify-center"
-                >
-                  {loadingMore ? (
+              <div className="flex items-center gap-2 flex-wrap">
+                {edits.length < (hasActiveFilters && totalFilteredCount != null ? totalFilteredCount : totalEditCount) && (
+                  <button
+                    onClick={() => fetchEdits(false, true)}
+                    disabled={loadingMore}
+                    className="px-4 py-2 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-lg text-sm font-semibold transition duration-200 flex items-center justify-center"
+                  >
+                    {loadingMore ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        Loading...
+                      </>
+                    ) : (
+                      `Load ${EDITS_PAGE_SIZE} More`
+                    )}
+                  </button>
+                )}
+
+                <span className="text-gray-300 mx-1">|</span>
+
+                {(() => {
+                  const maxRecords = hasActiveFilters && totalFilteredCount != null ? totalFilteredCount : totalEditCount
+                  const totalPages = Math.ceil(maxRecords / EDITS_PAGE_SIZE) || 1
+                  return (
                     <>
-                      <svg className="animate-spin h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                      </svg>
-                      Loading...
+                      <button
+                        onClick={() => goToPage(currentPage - 1)}
+                        disabled={currentPage <= 1 || loading}
+                        className="px-3 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed text-gray-800 rounded-lg text-sm font-semibold transition duration-200"
+                      >
+                        ← Prev
+                      </button>
+                      <span className="text-sm text-gray-600 whitespace-nowrap">
+                        Page {currentPage} of {totalPages}
+                      </span>
+                      <button
+                        onClick={() => goToPage(currentPage + 1)}
+                        disabled={currentPage >= totalPages || loading}
+                        className="px-3 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed text-gray-800 rounded-lg text-sm font-semibold transition duration-200"
+                      >
+                        Next →
+                      </button>
                     </>
-                  ) : (
-                    `Load ${EDITS_PAGE_SIZE} More`
-                  )}
-                </button>
-              )}
+                  )
+                })()}
+              </div>
             </div>
           </div>
         )}

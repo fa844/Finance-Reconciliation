@@ -12,6 +12,8 @@ interface Table {
   table_name: string
 }
 
+const PAYMENT_METHOD_OPTIONS = ['BT', 'VCC', 'Inactive', 'Inactive OTA', 'Unknown'] as const
+
 function DataPageContent() {
   const [session, setSession] = useState<any>(null)
   const [tables, setTables] = useState<Table[]>([])
@@ -62,6 +64,11 @@ function DataPageContent() {
   const [anchorCell, setAnchorCell] = useState<{ rowIndex: number; column: string } | null>(null)
   const [cellSelection, setCellSelection] = useState<{ column: string; startRowIndex: number; endRowIndex: number } | null>(null)
   const [lastClickedCell, setLastClickedCell] = useState<{ rowIndex: number; column: string } | null>(null)
+  /** When set, show modal so user can paste into a textarea (fallback when clipboard read is blocked e.g. HTTP). Empty target = use current selection on Apply. */
+  const [pasteFallbackTarget, setPasteFallbackTarget] = useState<{ targetColumn: string; targetStartRow: number; hasRange: boolean } | null>(null)
+  const pasteFallbackTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const handlePasteRef = useRef<((e: React.KeyboardEvent) => Promise<void>) | null>(null)
+  const handleCopyRef = useRef<((e: React.KeyboardEvent) => void) | null>(null)
   const [downloadingCsv, setDownloadingCsv] = useState(false)
   /** True if auth check took too long (getSession hung or very slow) so we can show a message instead of endless Loading... */
   const [authCheckTimeout, setAuthCheckTimeout] = useState(false)
@@ -86,11 +93,11 @@ function DataPageContent() {
   const { setRightContent } = useHeaderRight()
 
   // Columns that should have multi-select dropdowns
-  const multiSelectColumns = ['country', 'channel', 'zuzu_managing_channel_invoicing', 'status', 'currency']
+  const multiSelectColumns = ['country', 'channel', 'zuzu_managing_channel_invoicing', 'status', 'currency', 'payment_method']
 
   // Columns that are dates (show date range picker instead of text filter)
   const isDateColumn = (col: string): boolean =>
-    col.includes('date') || col === 'created_at' || col === 'updated_at'
+    (col.includes('date') && col !== 'expiry_date') || col === 'created_at' || col === 'updated_at'
 
   // Columns that are pure numbers: right-align for display. Exclude the two confirmation number columns so users can continue to add digits on the left.
   const isNumericColumnForDisplay = (col: string): boolean =>
@@ -98,7 +105,9 @@ function DataPageContent() {
     col !== 'channel_booking_confirmation_number' &&
     (col === 'id' ||
       col === 'upload_id' ||
+      col === 'hms_id' ||
       col === 'number_of_room_nights' ||
+      col === 'gross_booking_value' ||
       col.includes('amount') ||
       col === 'payment_gateway_fees' ||
       col === 'total_payment_gateway_fees' ||
@@ -113,6 +122,7 @@ function DataPageContent() {
   // Columns that hold currency/money: show with exactly 2 decimal places (display only; storage keeps full precision)
   const isCurrencyColumn = (col: string): boolean =>
     col.includes('amount') ||
+    col === 'gross_booking_value' ||
     col === 'payment_gateway_fees' ||
     col === 'total_payment_gateway_fees' ||
     col === 'balance' ||
@@ -177,15 +187,45 @@ function DataPageContent() {
     return null
   }
 
+  const STICKY_COLS: Record<string, { width: number; left: number }> = {
+    'hms_id': { width: 90, left: 0 },
+    'hotel_name': { width: 150, left: 90 },
+    'country': { width: 80, left: 240 },
+    'channel_booking_confirmation_number': { width: 140, left: 320 },
+    'arrival_date': { width: 100, left: 460 },
+  }
+  const LAST_STICKY_COL = 'arrival_date'
+
+  const getStickyStyle = (col: string, zIndex: number): React.CSSProperties => {
+    if (selectedTable !== 'bookings') return {}
+    const cfg = STICKY_COLS[col]
+    if (!cfg) return {}
+    return {
+      position: 'sticky',
+      left: cfg.left,
+      minWidth: cfg.width,
+      width: cfg.width,
+      zIndex,
+      ...(col === LAST_STICKY_COL ? { boxShadow: '3px 0 6px -2px rgba(0,0,0,0.1)' } : {}),
+    }
+  }
+
+  const isStickyCol = (col: string) => selectedTable === 'bookings' && col in STICKY_COLS
+
   // Format column names for better display
   const formatColumnName = (col: string): string => {
     const specialNames: { [key: string]: string } = {
+      'hms_id': 'HMS ID',
+      'gross_booking_value': 'Gross Booking Value',
+      'channel_commission_amount': 'Channel Commission Amount',
       'net_of_demand_commission_amount_extranet': 'Net (of channel commission) amount (Extranet)',
       'net_of_channel_commissio_amount_extranet': 'Net (of channel commission) amount (Extranet)',
       'payment_request_date': 'Payment Request Date',
       'total_amount_submitted': 'Total Amount Submitted',
+      'payment_method': 'Payment Method',
       'amount_received': 'Amount Received',
       'payment_gateway_fees': 'Payment Gateway Fees',
+      'tax_amount_deducted': 'Tax Amount Deducted',
       'total_amount_received': 'Total Amount Received',
       'total_payment_gateway_fees': 'TOTAL Payment gateway fees',
       'payment_date': 'Payment Date',
@@ -196,6 +236,9 @@ function DataPageContent() {
       'variance_check': 'Variance Check',
       'transmission_queue_id': 'Transmission Queue ID',
       'reference_number': 'Reference Number',
+      'vcc_number': 'VCC Number',
+      'expiry_date': 'Expiry Date',
+      'cvc': 'CVC',
       'remarks': 'Remarks'
     }
     
@@ -322,6 +365,32 @@ function DataPageContent() {
     return () => clearTimeout(t)
   }, [session, selectedTable, searchParams, router])
 
+  // Focus paste fallback textarea when modal opens so user can Ctrl+V immediately
+  useEffect(() => {
+    if (!pasteFallbackTarget) return
+    const t = setTimeout(() => pasteFallbackTextareaRef.current?.focus(), 50)
+    return () => clearTimeout(t)
+  }, [pasteFallbackTarget])
+
+  // Document-level Ctrl+C and Ctrl+V so copy/paste work even when table doesn't have focus (e.g. after clicking a button or on HTTP)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const isCopy = e.key === 'c' && (e.ctrlKey || e.metaKey)
+      const isPaste = e.key === 'v' && (e.ctrlKey || e.metaKey)
+      if (!isCopy && !isPaste) return
+      const scrollEl = scrollContainerRef.current
+      if (scrollEl && scrollEl.contains(e.target as Node)) return // table handles it
+      e.preventDefault()
+      if (isCopy) {
+        handleCopyRef.current?.(e as unknown as React.KeyboardEvent)
+      } else {
+        handlePasteRef.current?.(e as unknown as React.KeyboardEvent)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => document.removeEventListener('keydown', onKeyDown, true)
+  }, [])
+
   const fetchTables = async () => {
     try {
       // Use Supabase REST API to get all tables by querying the PostgREST schema endpoint
@@ -429,16 +498,18 @@ function DataPageContent() {
           }
         })
 
-        // Apply date range filters
+        // Apply date range filters (use start/end of day so full days are included for timestamp columns)
         Object.keys(activeDateRangeFilters).forEach(column => {
           const { from, to } = activeDateRangeFilters[column] || {}
+          const isTimestampCol = column === 'created_at' || column === 'updated_at'
+          const isDateCol = column.includes('date') || isTimestampCol
           if (from?.trim()) {
-            const fromVal = column === 'created_at' || column === 'updated_at' ? `${from.trim()}T00:00:00.000Z` : from.trim()
+            const fromVal = isDateCol ? `${from.trim()}T00:00:00.000Z` : from.trim()
             countQuery = countQuery.gte(column, fromVal)
             dataQuery = dataQuery.gte(column, fromVal)
           }
           if (to?.trim()) {
-            const toVal = column === 'created_at' || column === 'updated_at' ? `${to.trim()}T23:59:59.999Z` : to.trim()
+            const toVal = isDateCol ? `${to.trim()}T23:59:59.999Z` : to.trim()
             countQuery = countQuery.lte(column, toVal)
             dataQuery = dataQuery.lte(column, toVal)
           }
@@ -471,7 +542,7 @@ function DataPageContent() {
         alert(`Error: ${error.message}`)
       } else if (data && data.length > 0) {
         setDataLoadError(null)
-        // Client-side enforce multi-select filters so displayed rows always match selected values
+        // Client-side enforce multi-select and date range filters so displayed rows always match
         let rowsToSet = data
         if (applyFilters) {
           for (const column of multiSelectColumns) {
@@ -485,6 +556,23 @@ function DataPageContent() {
               return allowedSet.has(s)
             })
           }
+          // Client-side enforce date range filters (handles DB format/timezone quirks)
+          Object.keys(activeDateRangeFilters).forEach(column => {
+            const { from: fromStr, to: toStr } = activeDateRangeFilters[column] || {}
+            if (!fromStr?.trim() && !toStr?.trim()) return
+            const fromMs = fromStr?.trim() ? new Date(fromStr.trim() + 'T00:00:00.000Z').getTime() : null
+            const toMs = toStr?.trim() ? new Date(toStr.trim() + 'T23:59:59.999Z').getTime() : null
+            rowsToSet = rowsToSet.filter((row: Record<string, unknown>) => {
+              const raw = row[column]
+              if (raw == null || raw === undefined || raw === '') return false
+              const dateStr = typeof raw === 'string' ? raw : String(raw)
+              const cellMs = new Date(dateStr).getTime()
+              if (Number.isNaN(cellMs)) return false
+              if (fromMs != null && cellMs < fromMs) return false
+              if (toMs != null && cellMs > toMs) return false
+              return true
+            })
+          })
         }
         if (append) {
           // Load more mode - append to existing data
@@ -504,8 +592,10 @@ function DataPageContent() {
           'variance_check',
           'payment_request_date',
           'total_amount_submitted',
+          'payment_method',
           'amount_received',
           'payment_gateway_fees',
+          'tax_amount_deducted',
           'total_amount_received',
           'total_payment_gateway_fees',
           'payment_date',
@@ -515,13 +605,32 @@ function DataPageContent() {
           'reconciled_amount_check',
           'transmission_queue_id',
           'reference_number',
+          'vcc_number',
+          'expiry_date',
+          'cvc',
           'remarks'
         ]
         
         // Main booking columns (everything except system and reconciliation)
-        const mainColumns = allColumns.filter(col => 
+        let mainColumns = allColumns.filter(col => 
           !systemColumns.includes(col) && !reconciliationCols.includes(col)
         )
+        // For bookings table: enforce order so hms_id appears immediately to the left of hotel_name
+        // Use tableName (not selectedTable) so order is applied even when response returns before state updates
+        if (tableName === 'bookings') {
+          const bookingMainOrder = [
+            'hms_id', 'hotel_name', 'country', 'channel_booking_confirmation_number', 'arrival_date', 'departure_date',
+            'id', 'zuzu_room_confirmation_number', 'name', 'status', 'channel',
+            'zuzu_managing_channel_invoicing', 'number_of_room_nights', 'gross_booking_value', 'channel_commission_amount', 'net_amount_by_zuzu', 'currency'
+          ]
+          const orderMap = new Map(bookingMainOrder.map((c, i) => [c, i]))
+          mainColumns = [...mainColumns].sort((a, b) => {
+            const ia = orderMap.has(a) ? orderMap.get(a)! : 9999
+            const ib = orderMap.has(b) ? orderMap.get(b)! : 9999
+            if (ia !== ib) return ia - ib
+            return a.localeCompare(b)
+          })
+        }
         
         // Build final order: main -> reconciliation -> system (include variance_check even if not yet in DB)
         const orderedColumns = [
@@ -557,8 +666,10 @@ function DataPageContent() {
           p_table_name: table,
           p_column_name: col,
         })
+
         if (!rpcError && Array.isArray(rpcData)) {
           const raw = rpcData.map(v => (typeof v === 'string' ? v : (v && typeof v === 'object' ? Object.values(v)[0] : null)))
+
           result[col] = raw.filter((v): v is string => typeof v === 'string').map(v => String(v).trim()).filter(Boolean).sort()
         } else {
           const limit = 10000
@@ -566,6 +677,7 @@ function DataPageContent() {
             .from(table)
             .select(col)
             .limit(limit)
+
           if (error) continue
           const values = (data ?? [])
             .map(row => String(((row as unknown) as Record<string, unknown>)[col] ?? '').trim())
@@ -625,14 +737,70 @@ function DataPageContent() {
     setDownloadingCsv(true)
     try {
       const batchSize = 1000
+      const numericColumns = ['id', 'upload_id', 'number_of_room_nights']
+      const hasActiveFilters = Object.keys(filters).some(k => (filters[k] ?? '').trim()) ||
+        Object.keys(multiSelectFilters).some(k => (multiSelectFilters[k] ?? []).length > 0) ||
+        Object.keys(dateRangeFilters).some(k => {
+          const r = dateRangeFilters[k]
+          return (r?.from ?? '').trim() || (r?.to ?? '').trim()
+        })
+
       let allData: any[] = []
       let from = 0
+
       while (true) {
-        const { data, error } = await supabase
+        let dataQuery = supabase
           .from('bookings')
           .select('*')
-          .order('id', { ascending: true })
-          .range(from, from + batchSize - 1)
+
+        if (hasActiveFilters) {
+          // Apply text filters (same logic as fetchTableData)
+          Object.keys(filters).forEach(column => {
+            const filterValue = (filters[column] ?? '').trim()
+            if (filterValue) {
+              if (numericColumns.includes(column)) {
+                const num = Number(filterValue)
+                if (!Number.isNaN(num) && Number.isInteger(num)) {
+                  dataQuery = dataQuery.eq(column, num)
+                } else {
+                  dataQuery = dataQuery.eq(column, -1)
+                }
+              } else {
+                dataQuery = dataQuery.ilike(column, `%${filterValue}%`)
+              }
+            }
+          })
+          // Apply multi-select filters
+          multiSelectColumns.forEach(column => {
+            const rawValues = multiSelectFilters[column]
+            if (!rawValues?.length) return
+            const selectedValues = [...new Set(rawValues.map((v: string) => String(v).trim()).filter(Boolean))]
+            if (selectedValues.length > 0) {
+              dataQuery = dataQuery.in(column, selectedValues)
+            }
+          })
+          // Apply date range filters
+          Object.keys(dateRangeFilters).forEach(column => {
+            const { from: fromVal, to: toVal } = dateRangeFilters[column] || {}
+            const isTimestampCol = column === 'created_at' || column === 'updated_at'
+            const isDateCol = column.includes('date') || isTimestampCol
+            if (fromVal?.trim()) {
+              const fromStr = isDateCol ? `${fromVal.trim()}T00:00:00.000Z` : fromVal.trim()
+              dataQuery = dataQuery.gte(column, fromStr)
+            }
+            if (toVal?.trim()) {
+              const toStr = isDateCol ? `${toVal.trim()}T23:59:59.999Z` : toVal.trim()
+              dataQuery = dataQuery.lte(column, toStr)
+            }
+          })
+        }
+
+        const orderCol = sortColumn ?? 'id'
+        const orderAsc = sortColumn ? (sortDirection === 'asc') : true
+        dataQuery = dataQuery.order(orderCol, { ascending: orderAsc })
+
+        const { data, error } = await dataQuery.range(from, from + batchSize - 1)
+
         if (error) {
           alert(`Error fetching bookings: ${error.message}`)
           return
@@ -642,8 +810,9 @@ function DataPageContent() {
         if (data.length < batchSize) break
         from += batchSize
       }
+
       if (allData.length === 0) {
-        alert('No bookings to export.')
+        alert(hasActiveFilters ? 'No bookings match the current filters.' : 'No bookings to export.')
         return
       }
       const cols = Object.keys(allData[0]).filter((c: string) => c !== 'total_amount_eceived')
@@ -708,24 +877,28 @@ function DataPageContent() {
     setCurrentPage(prev => prev - 1)
   }
 
-  const handleSort = (column: string) => {
-    // Use ref so rapid clicks see latest sort and toggle direction correctly (state updates are async)
-    const { column: lastCol, direction: lastDir } = lastSortRef.current
-    const newDirection = lastCol === column
-      ? (lastDir === 'asc' ? 'desc' : 'asc')
-      : 'asc'
-    lastSortRef.current = { column, direction: newDirection }
+  const goToPage = (page: number) => {
+    if (!selectedTable || page < 1) return
+    const hasActiveFilters = Object.keys(filters).some(k => filters[k]) || 
+                            Object.keys(multiSelectFilters).some(k => multiSelectFilters[k]?.length > 0) ||
+                            Object.keys(dateRangeFilters).some(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim())
+    setCurrentPage(page)
+    fetchTableData(selectedTable, page, false, hasActiveFilters)
+  }
+
+  const handleSort = (column: string, direction: 'asc' | 'desc') => {
+    lastSortRef.current = { column, direction }
     // Keep horizontal scroll so same columns stay visible (same as when applying filters)
     setSavedScrollPosition(scrollContainerRef.current?.scrollLeft ?? 0)
     setSortColumn(column)
-    setSortDirection(newDirection)
+    setSortDirection(direction)
     // Refetch first page with new sort so we get top 100 from entire DB
     const hasActiveFilters = Object.keys(filters).some(k => filters[k]) ||
       Object.keys(multiSelectFilters).some(k => multiSelectFilters[k]?.length > 0) ||
       Object.keys(dateRangeFilters).some(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim())
     if (selectedTable) {
       setCurrentPage(1)
-      fetchTableData(selectedTable, 1, false, hasActiveFilters, undefined, column, newDirection)
+      fetchTableData(selectedTable, 1, false, hasActiveFilters, undefined, column, direction)
       // Persist sort (and current filters) so they are restored next visit
       if (session?.user?.id) {
         saveFilterPrefs(session.user.id, 'data', {
@@ -733,7 +906,7 @@ function DataPageContent() {
           multiSelectFilters,
           dateRangeFilters,
           sortColumn: column,
-          sortDirection: newDirection,
+          sortDirection: direction,
         })
       }
     }
@@ -916,13 +1089,18 @@ function DataPageContent() {
         'net_of_channel_commissio_amount_extranet',
         'payment_request_date',
         'total_amount_submitted',
+        'payment_method',
         'amount_received',
         'payment_gateway_fees',
+        'tax_amount_deducted',
         'total_amount_received',
         'total_payment_gateway_fees',
         'payment_date',
         'transmission_queue_id',
         'reference_number',
+        'vcc_number',
+        'expiry_date',
+        'cvc',
         'remarks'
       ]
       for (const col of reconciliationColumns) {
@@ -1027,6 +1205,8 @@ function DataPageContent() {
   // Range selection: works on all columns (gray, blue, green). Single click selects cell; shift+click extends in same column; double-click edits green cells only.
   const handleCellClick = (rowIndex: number, column: string, e: React.MouseEvent) => {
     setLastClickedCell({ rowIndex, column })
+    // If this cell is already being edited, don't steal focus from the editor (e.g. select dropdown)
+    if (editingCell?.rowIndex === rowIndex && editingCell?.column === column) return
     // Shift+click: extend selection (same column only)
     if (e.shiftKey && anchorCell && anchorCell.column === column) {
       const start = Math.min(anchorCell.rowIndex, rowIndex)
@@ -1041,8 +1221,14 @@ function DataPageContent() {
     scrollContainerRef.current?.focus()
   }
 
-  const handleCellDoubleClick = (rowIndex: number, column: string, currentValue: any, isEditable: boolean, isFormula: boolean, isBeingEdited: boolean) => {
+  const handleCellDoubleClick = async (rowIndex: number, column: string, currentValue: any, isEditable: boolean, isFormula: boolean, isBeingEdited: boolean) => {
     if (!isEditable || isFormula || isBeingEdited) return
+    // If another cell is currently being edited, save it first (so date picker etc. don't lose the edit)
+    if (editingCell && (editingCell.rowIndex !== rowIndex || editingCell.column !== column)) {
+      const sorted = getSortedData()
+      const row = sorted[editingCell.rowIndex]
+      if (row) await saveCellEdit(row, editingCell.column, editingValue)
+    }
     setAnchorCell({ rowIndex, column })
     setCellSelection(null)
     startCellEdit(rowIndex, column, currentValue)
@@ -1054,6 +1240,9 @@ function DataPageContent() {
   }
 
   const handleCopy = async (e: React.KeyboardEvent) => {
+    // #region agent log
+    fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2c939b'},body:JSON.stringify({sessionId:'2c939b',location:'data/page.tsx:handleCopy',message:'handleCopy entered',data:{hasCellSelection:!!cellSelection,isSecureContext:typeof window!=='undefined'&&window.isSecureContext,hasClipboard:typeof navigator!=='undefined'&&!!navigator.clipboard},timestamp:Date.now(),hypothesisId:'A,C,E'})}).catch(()=>{});
+    // #endregion
     if (!cellSelection) return
     e.preventDefault()
     const sorted = getSortedData()
@@ -1068,7 +1257,13 @@ function DataPageContent() {
     const text = values.join('\n')
     try {
       await navigator.clipboard.writeText(text)
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2c939b'},body:JSON.stringify({sessionId:'2c939b',location:'data/page.tsx:handleCopy',message:'copy success via clipboard API',data:{},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
     } catch {
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2c939b'},body:JSON.stringify({sessionId:'2c939b',location:'data/page.tsx:handleCopy',message:'copy clipboard API failed, using fallback',data:{},timestamp:Date.now(),hypothesisId:'A,E'})}).catch(()=>{});
+      // #endregion
       // fallback for older browsers
       const textarea = document.createElement('textarea')
       textarea.value = text
@@ -1078,30 +1273,17 @@ function DataPageContent() {
       document.body.removeChild(textarea)
     }
   }
+  handleCopyRef.current = handleCopy
 
-  const handlePaste = async (e: React.KeyboardEvent) => {
-    const targetColumn = cellSelection ? cellSelection.column : lastClickedCell?.column
-    const targetStartRow = cellSelection ? cellSelection.startRowIndex : lastClickedCell?.rowIndex
-    if (targetColumn == null || targetStartRow == null || !isColumnEditable(targetColumn)) return
-    e.preventDefault()
-    let text: string
-    try {
-      text = await navigator.clipboard.readText()
-    } catch {
-      return
-    }
+  const applyPasteToCells = async (text: string, column: string, startRow: number, hasRange: boolean) => {
     const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
     const sourceSize = lines.length
     if (sourceSize === 0) return
-
-    const hasRange = !!cellSelection
-    const targetSize = hasRange ? cellSelection!.endRowIndex - cellSelection!.startRowIndex + 1 : 1
-    // Strict size check only when copying multiple cells into a range of multiple cells: destination must match source size (single-cell paste = paste downward, no error)
+    const targetSize = hasRange && cellSelection ? cellSelection.endRowIndex - cellSelection.startRowIndex + 1 : 1
     if (sourceSize > 1 && hasRange && targetSize > 1 && targetSize !== sourceSize) {
       alert(`The range is not the right size. It should be ${sourceSize} cell(s).`)
       return
     }
-
     let valuesToWrite: string[]
     let destCount: number
     if (sourceSize === 1) {
@@ -1111,16 +1293,45 @@ function DataPageContent() {
       valuesToWrite = lines
       destCount = sourceSize
     }
-
     const sorted = getSortedData()
     for (let i = 0; i < destCount; i++) {
-      const row = sorted[targetStartRow + i]
+      const row = sorted[startRow + i]
       if (!row) break
-      await saveCellEdit(row, targetColumn, valuesToWrite[i])
+      await saveCellEdit(row, column, valuesToWrite[i])
     }
     setCellSelection(null)
     setAnchorCell(null)
   }
+
+  const handlePaste = async (e: React.KeyboardEvent) => {
+    const targetColumn = cellSelection ? cellSelection.column : lastClickedCell?.column
+    const targetStartRow = cellSelection ? cellSelection.startRowIndex : lastClickedCell?.rowIndex
+    // #region agent log
+    fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2c939b'},body:JSON.stringify({sessionId:'2c939b',location:'data/page.tsx:handlePaste',message:'handlePaste entered',data:{targetColumn:targetColumn??null,targetStartRow:targetStartRow??null,hasCellSelection:!!cellSelection,lastClickedCell:lastClickedCell??null,isSecureContext:typeof window!=='undefined'&&window.isSecureContext,hasClipboard:typeof navigator!=='undefined'&&!!navigator.clipboard},timestamp:Date.now(),hypothesisId:'A,B,C,D'})}).catch(()=>{});
+    // #endregion
+    const hasValidTarget = targetColumn != null && targetStartRow != null && isColumnEditable(targetColumn)
+    let text: string
+    try {
+      text = await navigator.clipboard.readText()
+      e.preventDefault()
+      if (!hasValidTarget) return
+      await applyPasteToCells(text, targetColumn, targetStartRow, !!cellSelection)
+      return
+    } catch {
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2c939b'},body:JSON.stringify({sessionId:'2c939b',location:'data/page.tsx:handlePaste',message:'paste fallback: showing modal',data:{},timestamp:Date.now(),hypothesisId:'fallback'})}).catch(()=>{});
+      // #endregion
+      // Fallback for HTTP (insecure context): show modal; user pastes into textarea and we read .value. Target can be resolved on Apply.
+      e.preventDefault()
+      setPasteFallbackTarget(
+        hasValidTarget
+          ? { targetColumn, targetStartRow, hasRange: !!cellSelection }
+          : { targetColumn: '', targetStartRow: -1, hasRange: false }
+      )
+      return
+    }
+  }
+  handlePasteRef.current = handlePaste
 
   const clearSelectedCellsContent = async () => {
     if (!cellSelection || !isColumnEditable(cellSelection.column)) return
@@ -1142,10 +1353,16 @@ function DataPageContent() {
 
   const handleTableKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2c939b'},body:JSON.stringify({sessionId:'2c939b',location:'data/page.tsx:handleTableKeyDown',message:'Ctrl+C detected',data:{},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
       handleCopy(e)
       return
     }
     if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2c939b'},body:JSON.stringify({sessionId:'2c939b',location:'data/page.tsx:handleTableKeyDown',message:'Ctrl+V detected',data:{},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
       handlePaste(e)
       return
     }
@@ -1171,8 +1388,8 @@ function DataPageContent() {
   }
 
   // Recompute Balance, Reconciled amount Check, and balance-before-reference-date columns.
-  // Balance = Net amount by ZUZU - Amount received - Payment Gateway Fees (nulls treated as 0)
-  // Balance before reference date = net - (amount_received + payment_gateway_fees) only when payment_date <= reference_date
+  // Balance = Net amount by ZUZU - Amount received - Payment Gateway Fees - Tax Amount Deducted (nulls treated as 0)
+  // Balance before reference date = net - (amount_received + payment_gateway_fees + tax_amount_deducted) only when payment_date <= reference_date
   // Balance before reference date in SGD = balance_before_reference_dates / rate_to_sgd (SGD = 1)
   // Reconciled amount Check = Total amount submitted - Total amount received - Total payment gateway fees (all three required non-null)
   const computeFormulaColumns = (
@@ -1189,11 +1406,12 @@ function DataPageContent() {
     const netAmount = parseNum(row?.net_amount_by_zuzu)
     const amountReceived = parseNum(row?.amount_received) ?? 0
     const paymentGatewayFees = parseNum(row?.payment_gateway_fees) ?? 0
+    const taxAmountDeducted = parseNum(row?.tax_amount_deducted) ?? 0
     const totalSubmitted = parseNum(row?.total_amount_submitted)
     const totalReceived = parseNum(row?.total_amount_received)
     const totalPaymentGatewayFees = parseNum(row?.total_payment_gateway_fees)
     const extranet = parseNum(row?.net_of_channel_commissio_amount_extranet)
-    const balance = netAmount != null ? netAmount - amountReceived - paymentGatewayFees : null
+    const balance = netAmount != null ? netAmount - amountReceived - paymentGatewayFees - taxAmountDeducted : null
     const reconciled_amount_check = (totalSubmitted != null && totalReceived != null && totalPaymentGatewayFees != null) ? totalSubmitted - totalReceived - totalPaymentGatewayFees : null
     const variance_check = (netAmount != null && extranet != null) ? netAmount - extranet : null
 
@@ -1209,7 +1427,7 @@ function DataPageContent() {
             : (paymentDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
       const subtractAmount =
         paymentDateStr != null && paymentDateStr <= refDate
-          ? (parseNum(row?.amount_received) ?? 0) + (parseNum(row?.payment_gateway_fees) ?? 0)
+          ? (parseNum(row?.amount_received) ?? 0) + (parseNum(row?.payment_gateway_fees) ?? 0) + (parseNum(row?.tax_amount_deducted) ?? 0)
           : 0
       balance_before_reference_dates = netAmount - subtractAmount
 
@@ -1236,8 +1454,8 @@ function DataPageContent() {
 
   // Tooltip text shown when hovering over formula column header or cell
   const getFormulaColumnTooltip = (column: string): string | null => {
-    if (column === 'balance') return 'Net amount by ZUZU - Amount received - Payment Gateway Fees'
-    if (column === 'balance_before_reference_dates') return 'Balance, ignoring any payments done after the reference date (subtracts amount received + Payment Gateway Fees only when payment_date ≤ reference date).'
+    if (column === 'balance') return 'Net amount by ZUZU - Amount received - Payment Gateway Fees - Tax Amount Deducted'
+    if (column === 'balance_before_reference_dates') return 'Balance, ignoring any payments done after the reference date (subtracts amount received + Payment Gateway Fees + Tax Amount Deducted only when payment_date ≤ reference date).'
     if (column === 'balance_before_reference_date_in_sgd') return 'Balance (before reference date) converted to SGD'
     if (column === 'reconciled_amount_check') return 'Total amount submitted - Total amount received - TOTAL Payment gateway fees'
     if (column === 'variance_check') return 'Net amount by ZUZU − Net (of channel commission) amount (Extranet)'
@@ -1253,6 +1471,8 @@ function DataPageContent() {
     if (isFormulaColumn(column)) return false
     // currency is read-only (derived from country lookup)
     if (column === 'currency') return false
+    // hms_id is read-only (from Excel column E)
+    if (column === 'hms_id') return false
 
     // Reconciliation columns are editable (include both possible DB column names for net-of-commission)
     const reconciliationColumns = [
@@ -1260,13 +1480,18 @@ function DataPageContent() {
       'net_of_channel_commissio_amount_extranet',
       'payment_request_date',
       'total_amount_submitted',
+      'payment_method',
       'amount_received',
       'payment_gateway_fees',
+      'tax_amount_deducted',
       'total_amount_received',
       'total_payment_gateway_fees',
       'payment_date',
       'transmission_queue_id',
       'reference_number',
+      'vcc_number',
+      'expiry_date',
+      'cvc',
       'remarks'
     ]
     
@@ -1326,12 +1551,26 @@ function DataPageContent() {
     }
   }
 
-  // Data processing before insert: fill currency, negate net_amount_by_zuzu for Postpay, compute formula columns
+  // Data processing before insert: fill currency, negate net_amount_by_zuzu for Postpay, compute formula columns, fill payment_method
   const processUploadData = async (data: any[]): Promise<any[]> => {
-    const [currencyRes, appSettingsRes] = await Promise.all([
+    const [currencyRes, appSettingsRes, channelsRes] = await Promise.all([
       supabase.from('currency').select('country, currency_code, rate_to_sgd'),
-      supabase.from('app_settings').select('reference_date').eq('id', 1).maybeSingle()
+      supabase.from('app_settings').select('reference_date').eq('id', 1).maybeSingle(),
+      supabase.from('Channels').select('Channel, Channel_grouping'),
     ])
+    // Fetch ALL properties rows (Supabase default limit is 1000; paginate to get everything)
+    const allProperties: Record<string, unknown>[] = []
+    const PROP_PAGE = 1000
+    let propFrom = 0
+    let propDone = false
+    while (!propDone) {
+      const { data: propPage, error: propError } = await supabase.from('properties').select('*').range(propFrom, propFrom + PROP_PAGE - 1)
+      if (propError) { console.warn('Properties fetch error:', propError.message); propDone = true; break }
+      if (propPage) allProperties.push(...(propPage as Record<string, unknown>[]))
+      if (!propPage || propPage.length < PROP_PAGE) propDone = true
+      else propFrom += PROP_PAGE
+    }
+    const propertiesRes = { data: allProperties, error: null as any }
 
     if (currencyRes.error) {
       console.warn('Currency lookup failed, leaving currency empty:', currencyRes.error.message)
@@ -1351,6 +1590,29 @@ function DataPageContent() {
       }
     }
 
+    // Channels: booking channel (case-insensitive) → Channel_grouping (e.g. "bcom", "expedia")
+    const channelToGrouping = new Map<string, string>()
+    if (channelsRes.data) {
+      for (const row of channelsRes.data as any[]) {
+        const ch = (row.Channel ?? row.channel ?? '').toString().trim().toLowerCase()
+        const grouping = (row.Channel_grouping ?? row.channel_grouping ?? '').toString().trim()
+        if (ch && grouping) channelToGrouping.set(ch, grouping)
+      }
+    } else if (channelsRes.error) {
+      console.warn('Channels lookup failed:', channelsRes.error.message)
+    }
+
+    // Properties: hms_id → full row (each channel grouping is a column name with the payment method value)
+    const propertiesByHmsId = new Map<number, Record<string, unknown>>()
+    if (propertiesRes.data) {
+      for (const row of propertiesRes.data as Record<string, unknown>[]) {
+        const hmsId = Number(row.hms_id)
+        if (Number.isFinite(hmsId)) propertiesByHmsId.set(hmsId, row)
+      }
+    } else if (propertiesRes.error) {
+      console.warn('Properties lookup failed:', propertiesRes.error.message)
+    }
+
     const refDateRaw = appSettingsRes.data?.reference_date
     const refDate =
       refDateRaw == null
@@ -1359,7 +1621,7 @@ function DataPageContent() {
           ? refDateRaw.slice(0, 10)
           : (refDateRaw as Date)?.toISOString?.()?.slice(0, 10) ?? null
 
-    return data.map((row: any) => {
+    const result = data.map((row: any) => {
       const processed = { ...row }
       const country = processed.country?.trim()
       if (country) {
@@ -1371,6 +1633,22 @@ function DataPageContent() {
         const num = Number(processed.net_amount_by_zuzu)
         processed.net_amount_by_zuzu = -Math.abs(num)
       }
+
+      // Payment method: Channels → Channel_grouping → Properties column lookup
+      const grouping = channelToGrouping.get(channel.toLowerCase()) ?? null
+      const hmsId = processed.hms_id != null ? Number(processed.hms_id) : null
+      if (grouping && hmsId != null && Number.isFinite(hmsId)) {
+        const propRow = propertiesByHmsId.get(hmsId)
+        if (propRow) {
+          const pmValue = (propRow[grouping] ?? '').toString().trim()
+          processed.payment_method = pmValue || 'Unknown'
+        } else {
+          processed.payment_method = 'Unknown'
+        }
+      } else {
+        processed.payment_method = 'Unknown'
+      }
+
       // Balance and other formula columns (same logic as computeFormulaColumns)
       const computed = computeFormulaColumns(processed, refDate, ratesToSgdMap)
       if (computed.balance != null) processed.balance = computed.balance
@@ -1379,6 +1657,7 @@ function DataPageContent() {
       if (computed.variance_check != null) processed.variance_check = computed.variance_check
       return processed
     })
+    return result
   }
 
   /** Roll back a partial upload: delete upload_history and all inserted bookings (in batches). */
@@ -1544,7 +1823,7 @@ function DataPageContent() {
   }
 
   // Max rows to read from a sheet (Excel "used range" can be wrong; extend so we don't miss rows)
-  const MAX_SHEET_ROWS = 50000
+  const MAX_SHEET_ROWS = 100000
 
   const processSheet = async (workbook: any, sheetName: string, fileName: string = 'Unknown', file?: File) => {
     try {
@@ -1569,6 +1848,9 @@ function DataPageContent() {
       
       // Skip header row (assuming row 1 is headers) - adjust if needed
       const rows = jsonData.slice(1)
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:processSheet after sheet_to_json',message:'row count',data:{rowsLength:rows.length,MAX_SHEET_ROWS},timestamp:Date.now(),hypothesisId:'H3-H4'})}).catch(()=>{});
+      // #endregion
       if (uploadCancelledRef.current) {
         setUploadPhase('idle')
         setUploadProgressDetail('')
@@ -1579,6 +1861,9 @@ function DataPageContent() {
       setUploadProgressDetail('Checking for duplicates...')
 
       if (rows.length > MAX_SHEET_ROWS) {
+        // #region agent log
+        fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:processSheet row limit',message:'row limit exceeded',data:{rowsLength:rows.length,MAX_SHEET_ROWS},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
+        // #endregion
         alert(`This sheet has ${rows.length.toLocaleString()} rows. The maximum allowed is ${MAX_SHEET_ROWS.toLocaleString()} rows per sheet. Please split your file or reduce the number of rows.`)
         setLoading(false)
         setUploadPhase('idle')
@@ -1589,6 +1874,11 @@ function DataPageContent() {
       // Filter rows based on criteria:
       // Column T = "Regular" AND (Column AY matches one of the two ZUZU payment types)
       // Case-insensitive comparison
+      // #region agent log
+      const sample0 = rows[0] as any
+      const sample1 = rows[1] as any
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:filter sample',message:'column T and AY sample',data:{row0_T:sample0?.['T']??null,row0_AY:sample0?.['AY']??null,row1_T:sample1?.['T']??null,row1_AY:sample1?.['AY']??null,firstColKey:rows[0]?Object.keys(rows[0] as any)[0]:null},timestamp:Date.now(),hypothesisId:'filter'})}).catch(()=>{});
+      // #endregion
       const filteredRows = rows.filter((row: any) => {
         const columnT = row['T']?.trim().toLowerCase()
         const columnAY = row['AY']?.trim().toLowerCase()
@@ -1606,6 +1896,7 @@ function DataPageContent() {
         const country = row['F'] || null
         return {
           zuzu_room_confirmation_number: row['A'] ? parseInt(row['A']) : null,
+          hms_id: row['E'] ? parseInt(row['E']) : null,
           hotel_name: row['D'] || null,
           country: country,
           name: row['H'] || null,
@@ -1616,6 +1907,8 @@ function DataPageContent() {
           channel: row['AR'] || null,
           channel_booking_confirmation_number: row['AS'] ? parseInt(row['AS']) : null,
           zuzu_managing_channel_invoicing: row['AY'] || null,
+          gross_booking_value: row['BI'] ? parseFloat(row['BI']) : null,
+          channel_commission_amount: row['BO'] ? parseFloat(row['BO']) : null,
           net_amount_by_zuzu: row['CN'] ? parseFloat(row['CN']) : null,
           currency: null
         }
@@ -1668,6 +1961,9 @@ function DataPageContent() {
       }
       
       // Check for duplicate zuzu_room_confirmation_numbers
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:processSheet duplicate check start',message:'duplicate check phase',data:{validDataLength:validData.length},timestamp:Date.now(),hypothesisId:'H5'})}).catch(()=>{});
+      // #endregion
       const excelConfirmationNumbers = validData
         .map(row => row.zuzu_room_confirmation_number)
         .filter(num => num !== null)
@@ -1733,6 +2029,9 @@ function DataPageContent() {
       setShowDuplicateModal(true)
       setLoading(false)
     } catch (error: any) {
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:processSheet catch',message:'error processing sheet',data:{errorMessage:error?.message},timestamp:Date.now(),hypothesisId:'H4-H5'})}).catch(()=>{});
+      // #endregion
       alert(`Error processing sheet: ${error.message}`)
     } finally {
       setLoading(false)
@@ -1752,6 +2051,9 @@ function DataPageContent() {
     const file = e.target.files?.[0]
     if (!file) return
 
+    // #region agent log
+    fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:handleExcelUpload',message:'file selected',data:{fileName:file.name,fileSizeBytes:file.size},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     setLoading(true)
     setUploadFileName(file.name)
     setUploadedFileRef(file)
@@ -1760,7 +2062,13 @@ function DataPageContent() {
     reader.onload = async (event) => {
       try {
         const data = event.target?.result
+        // #region agent log
+        fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:reader.onload',message:'read complete',data:{dataLength:typeof data==='string'?data.length:0},timestamp:Date.now(),hypothesisId:'H1-H2'})}).catch(()=>{});
+        // #endregion
         const workbook = XLSX.read(data, { type: 'binary' })
+        // #region agent log
+        fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:after XLSX.read',message:'xlsx read ok',data:{sheetCount:workbook?.SheetNames?.length},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
+        // #endregion
         
         // Check if there are multiple sheets
         if (workbook.SheetNames.length > 1) {
@@ -1774,6 +2082,9 @@ function DataPageContent() {
           await processSheet(workbook, workbook.SheetNames[0], file.name, file)
         }
       } catch (error: any) {
+        // #region agent log
+        fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:reader.onload catch',message:'error reading file',data:{errorMessage:error?.message},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
+        // #endregion
         alert(`Error reading file: ${error.message}`)
         setLoading(false)
       } finally {
@@ -1783,6 +2094,9 @@ function DataPageContent() {
     }
     
     reader.onerror = () => {
+      // #region agent log
+      fetch('http://127.0.0.1:7341/ingest/3a862c3b-4322-45dc-8e46-11bf062be5d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'382544'},body:JSON.stringify({sessionId:'382544',location:'data/page.tsx:reader.onerror',message:'FileReader error',data:{},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
       alert('Error reading file')
       setLoading(false)
     }
@@ -1851,7 +2165,7 @@ function DataPageContent() {
             <input
               ref={excelFileInputRef}
               type="file"
-              accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
               onChange={handleExcelUpload}
               className="hidden"
               aria-hidden="true"
@@ -1859,7 +2173,7 @@ function DataPageContent() {
             <button
               type="button"
               onClick={() => excelFileInputRef.current?.click()}
-              className="shrink-0 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
+              className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
             >
               <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
@@ -1870,7 +2184,7 @@ function DataPageContent() {
               type="button"
               onClick={downloadBookingsCsv}
               disabled={downloadingCsv}
-              className="shrink-0 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
+              className="shrink-0 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
             >
               {downloadingCsv ? (
                 <>
@@ -1888,6 +2202,16 @@ function DataPageContent() {
                   Download CSV
                 </>
               )}
+            </button>
+            <button
+              type="button"
+              onClick={() => router.push('/bulk-update')}
+              className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition duration-200 flex items-center"
+            >
+              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Bulk Update
             </button>
             <button
               onClick={() => {
@@ -2049,50 +2373,56 @@ function DataPageContent() {
                           <th
                             key={col}
                             title={getFormulaColumnTooltip(col) ?? undefined}
-                            className={`px-2 py-2 text-xs font-medium uppercase tracking-wide cursor-pointer hover:bg-gray-100 break-words ${
+                            className={`px-2 py-2 text-xs font-medium uppercase tracking-wide break-words ${
                               isNumericColumnForDisplay(col) ? 'text-right' : 'text-left'
                             } ${
-                              isFormulaColumn(col) ? 'text-blue-700 bg-blue-50' : isColumnEditable(col) ? 'text-green-700 bg-green-50' : 'text-gray-500'
-                            }`}
+                              isFormulaColumn(col) ? 'text-blue-700 bg-blue-50' : col === 'payment_method' ? 'text-yellow-700 bg-yellow-50' : isColumnEditable(col) ? 'text-green-700 bg-green-50' : 'text-gray-500'
+                            } ${isStickyCol(col) ? 'bg-gray-100' : ''}`}
                             style={{
                               minWidth: col === 'id' || col === 'upload_id' ? '60px' :
+                                       col === 'hms_id' ? '90px' :
                                        col === 'currency' ? '50px' :
                                        col === 'country' || col === 'status' ? '80px' :
                                        col.includes('date') ? '90px' :
                                        col.includes('number') || col.includes('amount') || col.includes('nights') ? '100px' :
                                        col.includes('name') || col.includes('hotel') ? '150px' :
-                                       '120px'
-                            }}
-                            onClick={(e) => {
-                              // Don't sort if user just blurred a filter input (click outside) — only apply filters on Apply button
-                              if (filterInputJustBlurredRef.current) {
-                                filterInputJustBlurredRef.current = false
-                                return
-                              }
-                              // Don't sort if clicking the button
-                              if (!(e.target as HTMLElement).closest('button')) {
-                                handleSort(col)
-                              }
+                                       '120px',
+                              ...getStickyStyle(col, 20),
                             }}
                           >
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
                                 <span>{formatColumnName(col)}</span>
                                 {isColumnEditable(col) && !isFormulaColumn(col) && (
-                                  <svg className="w-3 h-3 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                                  <svg className={`w-3 h-3 ${col === 'payment_method' ? 'text-yellow-600' : 'text-green-600'}`} fill="currentColor" viewBox="0 0 20 20">
                                     <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
                                   </svg>
                                 )}
                               </div>
-                              {sortColumn === col && (
-                                <svg className="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  {sortDirection === 'asc' ? (
+                              <div className="flex flex-col ml-1 shrink-0" aria-label={`Sort by ${formatColumnName(col)}`}>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); handleSort(col, 'desc') }}
+                                  className={`p-0.5 rounded hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-gray-400 ${sortColumn === col && sortDirection === 'desc' ? 'text-orange-600' : 'text-gray-400'}`}
+                                  title="Sort descending"
+                                  aria-label="Sort descending"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                                  ) : (
+                                  </svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); handleSort(col, 'asc') }}
+                                  className={`p-0.5 rounded hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-gray-400 -mt-0.5 ${sortColumn === col && sortDirection === 'asc' ? 'text-orange-600' : 'text-gray-400'}`}
+                                  title="Sort ascending"
+                                  aria-label="Sort ascending"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                  )}
-                                </svg>
-                              )}
+                                  </svg>
+                                </button>
+                              </div>
                             </div>
                           </th>
                         ))}
@@ -2107,14 +2437,16 @@ function DataPageContent() {
                               const range = pendingDateRangeFilters[col] || { from: '', to: '' }
                               const hasRange = range.from?.trim() || range.to?.trim()
                               return (
-                                <th key={col} className="px-2 py-2 relative date-range-filter-wrap" style={{
+                                <th key={col} className={`px-2 py-2 relative date-range-filter-wrap ${isStickyCol(col) ? 'bg-orange-50' : ''}`} style={{
                                   minWidth: col === 'id' || col === 'upload_id' ? '60px' :
+                                           col === 'hms_id' ? '90px' :
                                            col === 'currency' ? '50px' :
                                            col === 'country' || col === 'status' ? '80px' :
                                            col.includes('date') ? '90px' :
                                            col.includes('number') || col.includes('amount') || col.includes('nights') ? '100px' :
                                            col.includes('name') || col.includes('hotel') ? '150px' :
-                                           '120px'
+                                           '120px',
+                                  ...getStickyStyle(col, 20),
                                 }}>
                                   <div className="relative">
                                     <button
@@ -2146,14 +2478,16 @@ function DataPageContent() {
                               const selectedValues = pendingMultiSelectFilters[col] || []
                               
                               return (
-                                <th key={col} className="px-2 py-2 relative" style={{
+                                <th key={col} className={`px-2 py-2 relative ${isStickyCol(col) ? 'bg-orange-50' : ''}`} style={{
                                   minWidth: col === 'id' || col === 'upload_id' ? '60px' :
+                                           col === 'hms_id' ? '90px' :
                                            col === 'currency' ? '50px' :
                                            col === 'country' || col === 'status' ? '80px' :
                                            col.includes('date') ? '90px' :
                                            col.includes('number') || col.includes('amount') || col.includes('nights') ? '100px' :
                                            col.includes('name') || col.includes('hotel') ? '150px' :
-                                           '120px'
+                                           '120px',
+                                  ...getStickyStyle(col, 20),
                                 }}>
                                   <div className="relative">
                                     <button
@@ -2179,14 +2513,16 @@ function DataPageContent() {
                             }
                             
                             return (
-                              <th key={col} className="px-2 py-2" style={{
+                              <th key={col} className={`px-2 py-2 ${isStickyCol(col) ? 'bg-orange-50' : ''}`} style={{
                                 minWidth: col === 'id' || col === 'upload_id' ? '60px' :
+                                         col === 'hms_id' ? '90px' :
                                          col === 'currency' ? '50px' :
                                          col === 'country' || col === 'status' ? '80px' :
                                          col.includes('date') ? '90px' :
                                          col.includes('number') || col.includes('amount') || col.includes('nights') ? '100px' :
                                          col.includes('name') || col.includes('hotel') ? '150px' :
-                                         '120px'
+                                         '120px',
+                                ...getStickyStyle(col, 20),
                               }}>
                                 <input
                                   type="text"
@@ -2276,6 +2612,7 @@ function DataPageContent() {
                         const allOptions = (distinct.length > 0 || selectedValues.length > 0)
                           ? [...new Set([...distinct, ...selectedValues])].sort()
                           : getUniqueValues(col)
+
                         return (
                           <div
                             className="filter-popup-portal min-w-max bg-white border border-gray-300 rounded-lg shadow-xl max-h-60 overflow-y-auto"
@@ -2340,19 +2677,21 @@ function DataPageContent() {
                               const isBeingEdited = editingCell?.rowIndex === idx && editingCell?.column === col
                               const isSelected = isCellInSelection(idx, col)
                               
-                              let cellValue =
-                                typeof row[col] === 'object' && row[col] !== null
-                                  ? JSON.stringify(row[col])
-                                  : displayValue(row[col])
-                              
-                              // For formula columns, show computed value when stored value is null (e.g. new uploads or old rows)
-                              if (isFormula && (cellValue === '' || row[col] == null)) {
+                              let cellValue: string
+                              if (isFormula) {
+                                // Formula columns: always show the computed value (never the stored value)
                                 const computed = computeFormulaColumns(row, referenceDate, ratesToSgd)
                                 if (col === 'balance' && computed.balance != null) cellValue = displayValue(computed.balance)
                                 else if (col === 'reconciled_amount_check' && computed.reconciled_amount_check != null) cellValue = displayValue(computed.reconciled_amount_check)
                                 else if (col === 'variance_check' && computed.variance_check != null) cellValue = displayValue(computed.variance_check)
                                 else if (col === 'balance_before_reference_dates' && computed.balance_before_reference_dates != null) cellValue = displayValue(computed.balance_before_reference_dates)
                                 else if (col === 'balance_before_reference_date_in_sgd' && computed.balance_before_reference_date_in_sgd != null) cellValue = displayValue(computed.balance_before_reference_date_in_sgd)
+                                else cellValue = ''
+                              } else {
+                                cellValue =
+                                  typeof row[col] === 'object' && row[col] !== null
+                                    ? JSON.stringify(row[col])
+                                    : displayValue(row[col])
                               }
                               
                               // Format timestamps
@@ -2363,8 +2702,9 @@ function DataPageContent() {
                               // Currency columns: show with 2 decimal places only (e.g. 80.2697 → 80.27)
                               if (isCurrencyColumn(col)) cellValue = formatCurrencyForDisplay(cellValue)
 
-                              const isDateField = col.includes('date')
-                              const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')
+                              const isDateField = col.includes('date') && col !== 'expiry_date'
+                              const isNumberField = (col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')) && col !== 'vcc_number'
+                              const isVccField = col === 'vcc_number' || col === 'expiry_date' || col === 'cvc'
                               // Visual reminder: red highlight when amount_received is set but payment_date is empty
                               const hasAmountReceived = row?.amount_received != null && String(row.amount_received).trim() !== ''
                               const hasPaymentDate = row?.payment_date != null && String(row.payment_date).trim() !== ''
@@ -2373,16 +2713,21 @@ function DataPageContent() {
                               return (
                                 <td 
                                   key={col} 
-                                  className={`px-2 py-2 ${isNumericColumnForDisplay(col) ? 'text-right' : ''} ${isSelected ? 'ring-2 ring-inset ring-orange-500' : ''} ${needsPaymentDateReminder ? 'bg-red-100 border-l-4 border-red-500' : ''} ${!isSelected && !needsPaymentDateReminder && isFormula ? 'bg-blue-50/70' : !isSelected && !needsPaymentDateReminder && isEditable ? 'bg-green-50 cursor-pointer hover:bg-green-100' : ''}`}
+                                  className={`px-2 py-2 ${isNumericColumnForDisplay(col) ? 'text-right' : ''} ${isSelected ? 'ring-2 ring-inset ring-orange-500' : ''} ${needsPaymentDateReminder ? 'bg-red-100 border-l-4 border-red-500' : ''} ${!isSelected && !needsPaymentDateReminder && isFormula ? 'bg-blue-50/70' : !isSelected && !needsPaymentDateReminder && isEditable && col === 'payment_method' ? 'bg-yellow-50 cursor-pointer hover:bg-yellow-100' : !isSelected && !needsPaymentDateReminder && isEditable ? 'bg-green-50 cursor-pointer hover:bg-green-100' : isStickyCol(col) ? (idx % 2 === 0 ? 'bg-white' : 'bg-gray-50') : ''}`}
                                   title={needsPaymentDateReminder ? 'Amount received is set — please add payment date.' : isEditable ? `Click to edit, Shift+click to select range. Ctrl+C copy, Ctrl+V paste.` : isFormula ? `${getFormulaColumnTooltip(col) ?? formatColumnName(col)} — Shift+click to select; Ctrl+C to copy.` : (cellValue ? `${cellValue} — ` : '') + 'Shift+click to select; Ctrl+C to copy.'}
                                   style={{
                                     minWidth: col === 'id' || col === 'upload_id' ? '60px' :
+                                             col === 'hms_id' ? '90px' :
                                              col === 'currency' ? '50px' :
                                              col === 'country' || col === 'status' ? '80px' :
+                                             col === 'vcc_number' ? '140px' :
+                                             col === 'expiry_date' ? '70px' :
+                                             col === 'cvc' ? '50px' :
                                              col.includes('date') ? '90px' :
                                              col.includes('number') || col.includes('amount') || col.includes('nights') ? '100px' :
                                              col.includes('name') || col.includes('hotel') ? '150px' :
-                                             '120px'
+                                             '120px',
+                                    ...getStickyStyle(col, 2),
                                   }}
                                   onMouseDown={(e) => {
                                     if (!isBeingEdited) e.preventDefault()
@@ -2395,12 +2740,86 @@ function DataPageContent() {
                                   }}
                                 >
                                   {isBeingEdited ? (
+                                    col === 'payment_method' ? (
+                                      <select
+                                        value={editingValue}
+                                        onChange={(e) => {
+                                          saveCellEdit(row, col, e.target.value)
+                                        }}
+                                        onBlur={(e) => {
+                                          saveCellEdit(row, col, e.target.value)
+                                        }}
+                                        onFocus={(e) => {
+                                          const el = e.target as HTMLSelectElement
+                                          if (typeof el.showPicker === 'function') {
+                                            try { el.showPicker() } catch {}
+                                          }
+                                        }}
+                                        onMouseDown={(e) => e.stopPropagation()}
+                                        onClick={(e) => e.stopPropagation()}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Escape') cancelCellEdit()
+                                        }}
+                                        autoFocus
+                                        className="w-full px-2 py-1 text-xs border-2 border-blue-500 rounded focus:outline-none focus:border-blue-600"
+                                      >
+                                        <option value="">— Select —</option>
+                                        {PAYMENT_METHOD_OPTIONS.map(opt => (
+                                          <option key={opt} value={opt}>{opt}</option>
+                                        ))}
+                                      </select>
+                                    ) : isVccField ? (
+                                    <input
+                                      type="text"
+                                      inputMode={col === 'expiry_date' ? 'numeric' : 'numeric'}
+                                      maxLength={col === 'vcc_number' ? 16 : col === 'cvc' ? 3 : 5}
+                                      placeholder={col === 'vcc_number' ? '0000000000000000' : col === 'expiry_date' ? 'MM/YY' : '000'}
+                                      value={editingValue}
+                                      onChange={(e) => {
+                                        let v = e.target.value
+                                        if (col === 'vcc_number') {
+                                          v = v.replace(/\D/g, '').slice(0, 16)
+                                        } else if (col === 'cvc') {
+                                          v = v.replace(/\D/g, '').slice(0, 3)
+                                        } else if (col === 'expiry_date') {
+                                          const digits = v.replace(/\D/g, '').slice(0, 4)
+                                          v = digits.length > 2 ? digits.slice(0, 2) + '/' + digits.slice(2) : digits
+                                        }
+                                        setEditingValue(v)
+                                      }}
+                                      onBlur={() => {
+                                        saveCellEdit(row, col, editingValue)
+                                      }}
+                                      onFocus={(e) => (e.target as HTMLInputElement).select()}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          saveCellEdit(row, col, (e.currentTarget as HTMLInputElement).value)
+                                        } else if (e.key === 'Escape') {
+                                          cancelCellEdit()
+                                        }
+                                      }}
+                                      autoFocus
+                                      className="w-full px-2 py-1 text-xs border-2 border-blue-500 rounded focus:outline-none focus:border-blue-600"
+                                    />
+                                    ) : (
                                     <input
                                       type={isDateField ? 'date' : isNumberField ? 'number' : 'text'}
                                       step={isNumberField && (col.includes('amount') || col.includes('balance')) ? '0.01' : '1'}
                                       value={editingValue}
-                                      onChange={(e) => setEditingValue(e.target.value)}
-                                      onBlur={(e) => saveCellEdit(row, col, (e.target as HTMLInputElement).value)}
+                                      onChange={(e) => {
+                                        setEditingValue(e.target.value)
+                                      }}
+                                      onBlur={(e) => {
+                                        saveCellEdit(row, col, (e.target as HTMLInputElement).value)
+                                      }}
+                                      onFocus={(e) => {
+                                        const el = e.target as HTMLInputElement
+                                        if (isDateField && typeof el.showPicker === 'function') {
+                                          el.showPicker()
+                                        } else if (!isDateField) {
+                                          el.select()
+                                        }
+                                      }}
                                       onKeyDown={(e) => {
                                         if (e.key === 'Enter') {
                                           saveCellEdit(row, col, (e.currentTarget as HTMLInputElement).value)
@@ -2411,9 +2830,10 @@ function DataPageContent() {
                                       autoFocus
                                       className={`w-full px-2 py-1 text-xs border-2 border-blue-500 rounded focus:outline-none focus:border-blue-600 ${isNumericColumnForDisplay(col) ? 'text-right' : ''}`}
                                     />
+                                    )
                                   ) : (
                                     <div className={`text-xs leading-normal whitespace-nowrap overflow-hidden text-ellipsis ${
-                                      needsPaymentDateReminder ? 'text-red-700 font-medium' : isFormula ? 'text-blue-800 font-medium' : isEditable ? 'text-green-800 font-medium' : 'text-gray-900'
+                                      needsPaymentDateReminder ? 'text-red-700 font-medium' : isFormula ? 'text-blue-800 font-medium' : isEditable && col === 'payment_method' ? 'text-yellow-800 font-medium' : isEditable ? 'text-green-800 font-medium' : 'text-gray-900'
                                     } ${isNumericColumnForDisplay(col) ? 'text-right' : ''}`}>
                                       {cellValue || (isEditable ? <span className={needsPaymentDateReminder ? 'text-red-600 italic' : 'text-gray-400 italic'}>Click to edit</span> : '')}
                                     </div>
@@ -2500,7 +2920,7 @@ function DataPageContent() {
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         {tableData.length > pageSize && (
                           <button
                             onClick={handleLoadLess}
@@ -2541,6 +2961,37 @@ function DataPageContent() {
                           </>
                         )}
                         </button>
+
+                        <span className="text-gray-300 mx-1">|</span>
+
+                        {(() => {
+                          const hasActiveFilters = Object.keys(filters).some(k => filters[k]) || 
+                                                  Object.keys(multiSelectFilters).some(k => multiSelectFilters[k]?.length > 0) ||
+                                                  Object.keys(dateRangeFilters).some(k => dateRangeFilters[k]?.from?.trim() || dateRangeFilters[k]?.to?.trim())
+                          const maxRecords = hasActiveFilters ? (totalFilteredCount || 0) : totalRecords
+                          const totalPages = Math.ceil(maxRecords / pageSize) || 1
+                          return (
+                            <>
+                              <button
+                                onClick={() => goToPage(currentPage - 1)}
+                                disabled={currentPage <= 1 || loading}
+                                className="px-3 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed text-gray-800 rounded-lg text-sm font-semibold transition duration-200"
+                              >
+                                ← Prev
+                              </button>
+                              <span className="text-sm text-gray-600 whitespace-nowrap">
+                                Page {currentPage} of {totalPages}
+                              </span>
+                              <button
+                                onClick={() => goToPage(currentPage + 1)}
+                                disabled={currentPage >= totalPages || loading}
+                                className="px-3 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed text-gray-800 rounded-lg text-sm font-semibold transition duration-200"
+                              >
+                                Next →
+                              </button>
+                            </>
+                          )
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -2548,6 +2999,56 @@ function DataPageContent() {
               </div>
             )}
       </div>
+
+      {/* Paste fallback modal (when clipboard read is blocked e.g. on HTTP) */}
+      {pasteFallbackTarget && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-4">
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Paste into table</h3>
+            <p className="text-sm text-gray-600 mb-3">
+              Paste your text below (Ctrl+V), then click a cell in the table if needed, then click Apply.
+            </p>
+            <textarea
+              ref={pasteFallbackTextareaRef}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm min-h-[120px] focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              placeholder="Paste here..."
+              rows={5}
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                type="button"
+                onClick={() => setPasteFallbackTarget(null)}
+                className="px-3 py-1.5 text-sm text-gray-700 border border-gray-300 rounded hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const text = pasteFallbackTextareaRef.current?.value?.trim() ?? ''
+                  if (!text) return
+                  let { targetColumn, targetStartRow, hasRange } = pasteFallbackTarget
+                  if (targetColumn === '' || targetStartRow < 0) {
+                    targetColumn = cellSelection?.column ?? lastClickedCell?.column ?? ''
+                    targetStartRow = cellSelection?.startRowIndex ?? lastClickedCell?.rowIndex ?? -1
+                    hasRange = !!cellSelection
+                  }
+                  if (targetColumn === '' || targetStartRow < 0 || !isColumnEditable(targetColumn)) {
+                    alert('Please click a cell in the table first to choose where to paste.')
+                    return
+                  }
+                  setPasteFallbackTarget(null)
+                  scrollContainerRef.current?.focus()
+                  await applyPasteToCells(text, targetColumn, targetStartRow, hasRange)
+                }}
+                className="px-3 py-1.5 text-sm text-white bg-blue-600 rounded hover:bg-blue-700"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal for Add/Edit */}
       {showModal && (
@@ -2584,16 +3085,19 @@ function DataPageContent() {
               {(() => {
                 const excelUploadColumns = [
                   'zuzu_room_confirmation_number',
+                  'hms_id',
                   'hotel_name',
                   'country',
                   'name',
                   'arrival_date',
                   'departure_date',
-                  'number_of_room_nights',
                   'status',
                   'channel',
                   'channel_booking_confirmation_number',
                   'zuzu_managing_channel_invoicing',
+                  'number_of_room_nights',
+                  'gross_booking_value',
+                  'channel_commission_amount',
                   'net_amount_by_zuzu',
                   'currency'
                 ]
@@ -2604,8 +3108,10 @@ function DataPageContent() {
                   'variance_check',
                   'payment_request_date',
                   'total_amount_submitted',
+                  'payment_method',
                   'amount_received',
                   'payment_gateway_fees',
+                  'tax_amount_deducted',
                   'total_amount_received',
                   'total_payment_gateway_fees',
                   'payment_date',
@@ -2615,6 +3121,9 @@ function DataPageContent() {
                   'reconciled_amount_check',
                   'transmission_queue_id',
                   'reference_number',
+                  'vcc_number',
+                  'expiry_date',
+                  'cvc',
                   'remarks'
                 ]
                 
@@ -2637,8 +3146,9 @@ function DataPageContent() {
                           {excelCols.map((col) => {
                             const value = modalMode === 'add' ? newRowData[col] : editFormData[col]
                             const isDateField = col.includes('date')
-                            const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')
+                            const isNumberField = col === 'hms_id' || col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')
                             const isReadOnly = modalMode === 'edit'
+                            const isHmsIdReadOnly = isReadOnly && col === 'hms_id'
 
                             return (
                               <div key={col}>
@@ -2659,7 +3169,9 @@ function DataPageContent() {
                                     }
                                   }}
                                   className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent ${
-                                    isReadOnly 
+                                    isHmsIdReadOnly
+                                      ? 'bg-gray-100 border-gray-200 text-gray-700 cursor-not-allowed font-mono'
+                                      : isReadOnly 
                                       ? 'bg-orange-50 border-orange-200 text-gray-700 cursor-not-allowed font-mono' 
                                       : 'border-gray-300'
                                   }`}
@@ -2680,8 +3192,9 @@ function DataPageContent() {
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           {reconCols.map((col) => {
                             const value = modalMode === 'add' ? newRowData[col] : editFormData[col]
-                            const isDateField = col.includes('date')
-                            const isNumberField = col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')
+                            const isDateField = col.includes('date') && col !== 'expiry_date'
+                            const isNumberField = (col.includes('number') || col.includes('amount') || col.includes('balance') || col.includes('nights') || col.includes('fees')) && col !== 'vcc_number'
+                            const isVccField = col === 'vcc_number' || col === 'expiry_date' || col === 'cvc'
                             const isTextArea = col.includes('remarks') || col.includes('reconciled_amount_check')
                             const isFormula = isFormulaColumn(col)
                             
@@ -2690,7 +3203,25 @@ function DataPageContent() {
                                 <label className={`block text-sm font-medium mb-1 ${isFormula ? 'text-blue-700' : 'text-gray-700'}`}>
                                   {formatColumnName(col)}
                                 </label>
-                                {isTextArea ? (
+                                {col === 'payment_method' ? (
+                                  <select
+                                    value={displayValue(value)}
+                                    onChange={(e) => {
+                                      const newValue = e.target.value
+                                      if (modalMode === 'add') {
+                                        setNewRowData({ ...newRowData, [col]: newValue })
+                                      } else {
+                                        setEditFormData({ ...editFormData, [col]: newValue })
+                                      }
+                                    }}
+                                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent border-gray-300"
+                                  >
+                                    <option value="">— Select —</option>
+                                    {PAYMENT_METHOD_OPTIONS.map(opt => (
+                                      <option key={opt} value={opt}>{opt}</option>
+                                    ))}
+                                  </select>
+                                ) : isTextArea ? (
                                   <textarea
                                     value={displayValue(value)}
                                     readOnly={isFormula}
@@ -2706,6 +3237,31 @@ function DataPageContent() {
                                     className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent ${
                                       isFormula ? 'bg-blue-50 border-blue-200 text-blue-800 cursor-not-allowed' : 'border-gray-300'
                                     }`}
+                                  />
+                                ) : isVccField ? (
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    maxLength={col === 'vcc_number' ? 16 : col === 'cvc' ? 3 : 5}
+                                    placeholder={col === 'vcc_number' ? '0000000000000000' : col === 'expiry_date' ? 'MM/YY' : '000'}
+                                    value={displayValue(value)}
+                                    onChange={(e) => {
+                                      let v = e.target.value
+                                      if (col === 'vcc_number') {
+                                        v = v.replace(/\D/g, '').slice(0, 16)
+                                      } else if (col === 'cvc') {
+                                        v = v.replace(/\D/g, '').slice(0, 3)
+                                      } else if (col === 'expiry_date') {
+                                        const digits = v.replace(/\D/g, '').slice(0, 4)
+                                        v = digits.length > 2 ? digits.slice(0, 2) + '/' + digits.slice(2) : digits
+                                      }
+                                      if (modalMode === 'add') {
+                                        setNewRowData({ ...newRowData, [col]: v })
+                                      } else {
+                                        setEditFormData({ ...editFormData, [col]: v })
+                                      }
+                                    }}
+                                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent border-gray-300"
                                   />
                                 ) : (
                                   <input

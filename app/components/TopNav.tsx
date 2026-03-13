@@ -11,6 +11,7 @@ const PAGES = [
   { name: 'Edits', path: '/history' },
   { name: 'Dashboard', path: '/dashboard' },
   { name: 'Settings', path: '/settings' },
+  { name: 'Properties', path: '/properties' },
 ] as const
 
 export default function TopNav() {

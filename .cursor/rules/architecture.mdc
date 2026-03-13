@@ -19,3 +19,5 @@ globs: **/*
 
 ## 4. Progress Tracking
 - If a task is complex, provide a brief "Current Progress" checklist at the end of your response so I can copy it into the next session if the context window gets full.
+
+## 5. Create and keep updated a pdr.md document where you list all the features that are added little by little so we can use it later on for testing purposes (listing and running unit tests.).

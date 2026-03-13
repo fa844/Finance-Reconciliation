@@ -281,8 +281,8 @@ export default function Dashboard() {
       if (filterChannel.length > 0) countQuery = countQuery.in('channel', filterChannel)
       if (filterCurrency.length > 0) countQuery = countQuery.in('currency', filterCurrency)
       if (filterStatus.length > 0) countQuery = countQuery.in('status', filterStatus)
-      if (dateFrom) countQuery = countQuery.gte('created_at', `${dateFrom}T00:00:00.000Z`)
-      if (dateTo) countQuery = countQuery.lte('created_at', `${dateTo}T23:59:59.999Z`)
+      if (dateFrom) countQuery = countQuery.gte('arrival_date', dateFrom)
+      if (dateTo) countQuery = countQuery.lte('arrival_date', dateTo)
 
       const { count, error } = await countQuery
 
@@ -329,8 +329,8 @@ export default function Dashboard() {
         if (filterChannel.length > 0) dataQuery = dataQuery.in('channel', filterChannel)
         if (filterCurrency.length > 0) dataQuery = dataQuery.in('currency', filterCurrency)
         if (filterStatus.length > 0) dataQuery = dataQuery.in('status', filterStatus)
-        if (dateFrom) dataQuery = dataQuery.gte('created_at', `${dateFrom}T00:00:00.000Z`)
-        if (dateTo) dataQuery = dataQuery.lte('created_at', `${dateTo}T23:59:59.999Z`)
+        if (dateFrom) dataQuery = dataQuery.gte('arrival_date', dateFrom)
+        if (dateTo) dataQuery = dataQuery.lte('arrival_date', dateTo)
 
         const { data: page, error: dataError } = await dataQuery
         if (dataError) {
@@ -464,7 +464,7 @@ export default function Dashboard() {
               onOpenChange={setOpenDropdown}
             />
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">From date</label>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Arrival from date</label>
               <input
                 type="date"
                 value={dateFrom}
@@ -473,7 +473,7 @@ export default function Dashboard() {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">To date</label>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Arrival to date</label>
               <input
                 type="date"
                 value={dateTo}
